@@ -1,0 +1,2645 @@
+local _, ns = ...
+
+-- The addon's own settings window, with the settings grouped on tabs. Every setting is a row:
+-- a checkbox, a choice or number with arrows, a dropdown, or a button. The controller works it while it is open:
+-- D-pad up / down picks a row, left / right changes it, A toggles or presses, L1 / R1 change tab,
+-- and B or Start closes it. It is a plain frame, not one of the game's panels, so opening it does not
+-- go through Forever's window focus. The tabs are a column on the left, under a search box that
+-- finds settings on every tab by name or description.
+
+local SIDEBAR = 170 -- width of the tab column on the left
+local WIDTH, HEIGHT = 580 + SIDEBAR, 740
+local ROW_HEIGHT = 32
+local TITLE_HEIGHT = 34
+local ROWS_TOP = -50
+local GOLD = { 1, 0.82, 0 }
+
+-- Labels and tips name buttons as {PADLSHOULDER} and the like: icons of the controller in use on
+-- screen, plain names in search. See ns.ButtonText.
+local ButtonText = ns.ButtonText
+
+local function HighlightChoices()
+	return {
+		{ "outline", "Outline" },
+		{ "thick", "Thick outline" },
+		{ "fill", "Fill" },
+		{ "pulse", "Pulse" },
+		{ "none", "None" },
+	}
+end
+
+local function StickChoices()
+	local choices = {}
+	for _, action in ipairs(ns.STICK_ACTIONS) do
+		local group = action[4] and "spell" or ns.STICK_ACTION_GROUPS and ns.STICK_ACTION_GROUPS[action[1]]
+		tinsert(choices, { action[1], action[2], action[5] or (action[1] == "ring" and ns.ICON or nil), group })
+	end
+	return choices
+end
+
+local function L1RightStickChoices()
+	local choices = {}
+	for _, action in ipairs(ns.L1_RIGHT_STICK) do
+		tinsert(choices, { action[1], action[2] })
+	end
+	return choices
+end
+
+local function L1R1Choices()
+	local choices = { { "sheatheSmart", "Sheathe, dismount or descend", nil, "character" } }
+	for _, choice in ipairs(StickChoices()) do
+		tinsert(choices, choice)
+	end
+	return choices
+end
+
+local function ActiveColorChoices()
+	local choices = {}
+	for _, color in ipairs(ns.HIGHLIGHT_COLORS) do
+		tinsert(choices, { color[1], format("|cff%02x%02x%02x%s|r", math.floor(color[3] * 255), math.floor(color[4] * 255), math.floor(color[5] * 255), color[2]) })
+	end
+	return choices
+end
+
+local function SideChoices()
+	local choices = {}
+	for side = 1, ns.NUM_SETS * 2 do
+		local set, letter = ns.DescribeSide(side)
+		tinsert(choices, { side, "Set " .. set .. " " .. (letter == "L" and "left" or "right") })
+	end
+	return choices
+end
+
+local function SetChoices()
+	local choices = {}
+	for set = 1, ns.NUM_SETS do
+		tinsert(choices, { set, "Set " .. set })
+	end
+	return choices
+end
+
+-- A form can also use the game's own stance bar (set 0).
+local function FormSetChoices()
+	local choices = { { 0, "The game's stance bar" } }
+	for _, choice in ipairs(SetChoices()) do
+		tinsert(choices, choice)
+	end
+	return choices
+end
+
+local function Sync()
+	ns.Sync()
+end
+
+local function Refresh()
+	ns.RefreshVisuals()
+end
+
+local function Nothing() end
+
+-- Buttons that show something on the crossbar close the window first so it can be seen.
+local function CloseAnd(action)
+	return function()
+		ns.CloseConfig()
+		action()
+	end
+end
+
+-- Defined further down; the rows below call them.
+local UpdateRows, OpenTextDialog
+
+-- Profiles (Profiles.lua): the profile picked under Other profiles, and Copy / Delete waiting for a
+-- second press.
+local profilePick, profileArmed
+
+local function NoneChoice(list)
+	if #list == 0 then
+		list[1] = { false, "|cff8c8c8cNo other profiles yet|r" }
+	end
+	return list
+end
+
+local function OtherProfiles()
+	return NoneChoice(ns.ProfileChoices(ns.ProfileInUse()))
+end
+
+local function PickedProfile()
+	local list = OtherProfiles()
+	for _, choice in ipairs(list) do
+		if choice[1] == profilePick then
+			return profilePick
+		end
+	end
+	profilePick = list[1][1]
+	return profilePick
+end
+
+local profileButtons = {
+	{ text = "Copy to mine" },
+	{ text = "Delete", danger = true },
+}
+
+local function DisarmProfile()
+	profileArmed = nil
+	profileButtons[1].text, profileButtons[2].text = "Copy to mine", "Delete"
+end
+
+-- Copy and Delete act on the second press, within 5 seconds.
+local function Armed(which, index, label)
+	local name = PickedProfile()
+	if not name then
+		ns.Print("There is no other profile yet.")
+		return
+	end
+	if profileArmed == which .. name then
+		DisarmProfile()
+		return name
+	end
+	DisarmProfile()
+	profileArmed = which .. name
+	profileButtons[index].text = "Press again"
+	ns.Print("Press " .. label .. " again to " .. which .. " " .. name .. ".")
+	C_Timer.After(5, function()
+		if profileArmed == which .. name then
+			DisarmProfile()
+			if UpdateRows then UpdateRows() end
+		end
+	end)
+end
+
+profileButtons[1].run = function()
+	local name = Armed("copy the settings of", 1, "Copy to mine")
+	if name then
+		ns.CopyProfile(name)
+		ns.Print("Copied the settings of " .. name .. " into " .. ns.ProfileInUse() .. ".")
+	end
+	UpdateRows()
+end
+
+profileButtons[2].run = function()
+	local name = Armed("delete", 2, "Delete")
+	if name then
+		ns.DeleteProfile(name)
+		ns.Print("Deleted the profile " .. name .. ".")
+	end
+	UpdateRows()
+end
+
+local function NewProfile()
+	DisarmProfile()
+	OpenTextDialog("New profile", "Profile name", "",
+		"A new profile with your current settings, which this character then uses. Other characters can use it too.",
+		function(name)
+			if ns.NewProfile(name) then
+				ns.Print("This character now uses the new profile " .. name .. ".")
+			else
+				ns.Print("A profile named " .. name .. " already exists. Pick it in Profile in use instead.")
+			end
+			UpdateRows()
+		end, "Create")
+end
+
+local function ExportString()
+	OpenTextDialog("Export settings", "Settings string", ns.ExportSettings(),
+		"Selected: copy it with Ctrl+C and paste it anywhere. Import on another character or account uses it.",
+		Nothing, "Done", true)
+end
+
+local function ImportString()
+	OpenTextDialog("Import settings", "Paste a settings string", "",
+		"Paste with Ctrl+V. It replaces the settings it holds; the ring and the abilities on the bars stay as they are.",
+		function(text)
+			local count, problem = ns.ImportSettings(text)
+			if count then
+				ns.Print("Imported " .. count .. " settings.")
+			else
+				ns.Print(problem)
+			end
+			UpdateRows()
+		end, "Import")
+end
+
+local function BuildTabs()
+	local formRows = {}
+	for form = 1, ns.NUM_FORMS do
+		tinsert(formRows, { type = "choice", key = "formSet" .. form, label = "Form " .. form .. " uses", choices = FormSetChoices,
+			tip = "The set the bottom row switches to in this form or stance. Form 1 is stealth for rogues and cat form for druids. By default forms 1-4 use sets 5-8." })
+	end
+
+	local tabs = {
+		{
+			name = "General",
+			icon = "Interface\\Icons\\INV_Misc_Gear_01",
+			rows = {
+				{ type = "header", label = "CROSSBAR" },
+				{ type = "check", key = "enabled", label = "Enable layout",
+					tip = "Replaces Forever's action bar with the cross hotbars. Turn off to get Forever's bar back. Only works with the game's gamepad UI on." },
+				{ type = "action", label = "Bar positions", button = "Move bars", run = CloseAnd(function() ns.ToggleMove() end),
+					tip = "Unlocks the bars so you can drag them anywhere on the screen with the mouse." },
+				{ type = "check", key = "moveBarsSeparately", label = "Move bars separately",
+					tip = "Off: Move bars carries all four bars together. On: each bar is dragged on its own; Shift + drag still moves them all." },
+				{ type = "action", label = "Tutorial", button = "Start the tutorial", run = CloseAnd(function() ns.StartTutorial() end),
+					tip = "A short tutorial of the buttons, with a controller showing what to press. It shows once by itself after installing." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "INTERFACE" },
+				{ type = "check", key = "minimapShown", label = "Show minimap icon", onChange = function() ns.UpdateMinimapButton() end,
+					tip = "The Gamepad XIV icon on the minimap. Left click opens these settings, right click a quick menu; drag it to move it." },
+				{ type = "check", key = "showInteractPrompt", label = "Show interact prompt", onChange = Nothing,
+					tip = "Over the character: the button, the action's icon and the name of what you can loot, talk to, skin, mine or gather." },
+				{ type = "choice", key = "promptStrata", label = "Interact prompt layer", onChange = function() ns.ApplyLayout() end,
+					choices = function() return { { "HIGH", "Above windows" }, { "MEDIUM", "Same as windows" }, { "LOW", "Below windows" }, { "BACKGROUND", "Background" } } end,
+					tip = "Whether the interact prompt is drawn over game windows, like a vendor or quest window, or under them. Lower it if the prompt covers a window you're using." },
+				{ type = "check", key = "lootDetails", label = "Show loot roll item details",
+					onChange = function() if ns.RefreshLootDetails then ns.RefreshLootDetails() end end,
+					tip = "While a loot roll window is open, the item and what you wear in that slot are shown beside it." },
+				{ type = "check", key = "alwaysCompareItems", label = "Always compare items",
+					onChange = function() ns.ApplyAlwaysCompare() end,
+					tip = "Every item tooltip also shows what you wear in that slot, without holding Shift. This is WoW's own setting." },
+				{ type = "check", key = "spellbookAssign", label = "Replace Forever's Bind to Action Bar",
+					tip = "In the spellbook, {PAD3} on an ability lets you choose its slot on the crossbar, on any set, instead of Forever's Bind to Action Bar. The spellbook closes and you choose the slot." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "CLASS MENUS" },
+				{ type = "choice", key = "classMenuChord", label = "Stance, form and aura menu",
+					choices = function() return { { "show", "Opens" }, { "disable", "Disabled" } } end,
+					tip = "Warriors, druids, paladins and other classes with Forever's stance, form or aura menu: what happens when a trigger is held and the shoulder on its side is pressed. Disabled: the menu doesn't open, so {PADLTRIGGER} + {PADLSHOULDER} and {PADRTRIGGER} + {PADRSHOULDER} only target enemies. {PADLSHOULDER} + {PADRSTICK} and {PADRSHOULDER} + {PADLSTICK} still open it. Hunters and warlocks use the two pet menu settings below." },
+				{ type = "choice", key = "petLeftButton", label = "Pet commands button",
+					choices = function() return { { "show", "Shown" }, { "hide", "Hidden" }, { "disable", "Disabled" } } end,
+					tip = "Hunters and warlocks: the left pet menu button under the crossbar (attack, follow, stay). Hidden: {PADLSHOULDER} + {PADLTRIGGER} still opens the menu. Disabled: also hidden, the menu no longer opens, and {PADLSHOULDER} with {PADLTRIGGER} held targets enemies instead." },
+				{ type = "choice", key = "petRightButton", label = "Pet spells button",
+					choices = function() return { { "show", "Shown" }, { "hide", "Hidden" }, { "disable", "Disabled" } } end,
+					tip = "Hunters and warlocks: the right pet menu button under the crossbar (the pet's abilities). Hidden: {PADRSHOULDER} + {PADRTRIGGER} still opens the menu. Disabled: also hidden, the menu no longer opens, and {PADRSHOULDER} with {PADRTRIGGER} held targets enemies instead." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "CAMERA" },
+				{ type = "check", key = "autoFace", label = "Face target (turn toward the enemy)",
+					onChange = function()
+						ns.AllowExperimentalCamera()
+						ns.Sync()
+					end,
+					tip = "Experimental. Turns you toward your enemy target by locking the camera on it, since WoW can't turn only the character. The camera then follows the target too." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "LOOKING FOR GROUP" },
+				{ type = "action", label = "Group finder message", button = "Edit message",
+					run = function()
+						OpenTextDialog("Group finder message", "The whisper {PAD1} sends to a group's leader in Looking For Group", ns.db.lfgMessage,
+							"Filled in when sent: <level>, <class>, <name> (yours), <leader>, <activity> and <roles> (the roles ticked in Looking For Group, or nothing). A keyboard or the on-screen keyboard is needed to type.",
+							function(text) ns.db.lfgMessage = text; UpdateRows() end)
+					end,
+					tip = function() return "In Looking For Group, {PAD1} on a group whispers this to its leader:\n" .. ns.db.lfgMessage end },
+				{ type = "check", key = "lfgConfirm", label = "Ask before whispering a group",
+					tip = "On: {PAD1} on a group first asks whether to send the message. Off: it is sent straight away." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "BAGS" },
+				{ type = "check", key = "openBagsWhenNeeded", label = "Open bags when needed (experimental)",
+					tip = "Experimental. Opens your bags when a spell or scroll asks you to pick an item, and at the mailbox, if the game left them closed." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "CHAT" },
+				{ type = "check", key = "chatLinks", label = "Link items in chat",
+					tip = "{PAD1} on an item, spell or quest link in chat opens it, a Shift-click on an item puts its link in an open, empty chat box, and a link Shift-clicked with chat closed goes in when chat opens next. If you get \"action blocked\" errors, try turning this off, as it runs the game's chat code." },
+			},
+		},
+		{
+			name = "Targeting",
+			icon = "Interface\\Icons\\Ability_Hunter_SniperShot",
+			rows = {
+				{ type = "header", label = "TARGETING" },
+				{ type = "choice", key = "dpadTarget", label = "D-pad left / right selection",
+					choices = function() return { { "enemy", "Enemies only" }, { "friend", "Friendly only" }, { "both", "Both" } } end,
+					tip = "Which targets {PADDLEFT} / {PADDRIGHT} step through: enemies, friendlies, or both in turn. Not used while D-pad party selection is on." },
+				{ type = "choice", key = "dpadTargetCombat", label = "D-pad left / right in combat",
+					choices = function() return { { "same", "Same as out of combat" }, { "enemy", "Enemies only" }, { "friend", "Friendly only" }, { "both", "Both" } } end,
+					tip = "Which targets {PADDLEFT} / {PADDRIGHT} step through in combat. For example Both out of combat and Enemies only in combat." },
+				{ type = "choice", key = "crossEnemy", label = "{PAD1} on an enemy target",
+					choices = function() return { { "forever", "Toggle the attack" }, { "attack", "Keep attacking" }, { "nothing", "Nothing" } } end,
+					tip = "What {PAD1} does with a living enemy targeted. Toggle the attack: the game's own, a second press stops attacking. Keep attacking: starts the attack and never stops it, like FFXIV. Nothing: keeps the target and doesn't attack. With no target, a friend or a corpse, {PAD1} interacts as usual." },
+				{ type = "choice", key = "dpadParty", label = "D-pad party selection",
+					choices = function() return { { "off", "Off" }, { "raid", "In a raid" }, { "always", "Always" } } end,
+					tip = "When the whole D-pad moves over the party and raid frames, each direction to the frame that way. Off: the D-pad works as usual, {PADDLEFT} / {PADDRIGHT} as set above." },
+				{ type = "check", key = "l1DoubleTapParty", label = "Double tap {PADLSHOULDER} selects party members",
+					tip = "A double tap of {PADLSHOULDER} steps through the party or raid. Off: {PADLSHOULDER} only shows its bar, so it never changes your target when you tab target with {PADLTRIGGER} / {PADRTRIGGER} + {PADLSHOULDER}." },
+				{ type = "choice", key = "partyTargeting", label = "Party targeting",
+					choices = function() return { { "soft", "Soft" }, { "hard", "Hard" } } end,
+					tip = "Hard: selecting a party or raid member makes them your target. Soft (like FFXIV): they get only your next ability, and your enemy target stays." },
+				{ type = "check", key = "skipPets", label = "Exclude pets from party targeting",
+					tip = "{PADDUP} / {PADDDOWN} step through the players only, like FFXIV. Off: pets shown on the party or raid frames are selected too." },
+				{ type = "check", key = "skipSelf", label = "Exclude yourself from party targeting",
+					tip = "{PADDUP} / {PADDDOWN} step through the other party members only, so fewer presses reach the one you want. With no target or an enemy targeted, a heal already lands on you. Only in a party, not in a raid." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "PARTY AND RAID FRAMES" },
+				{ type = "choice", key = "partyHighlight", label = "Party highlight", choices = HighlightChoices,
+					tip = "How the selected party member's frame is marked. Outline: a thin gold border. Thick outline: a wide one. Fill: a gold tint with a border. Pulse: a border that fades in and out. None: no mark on the frame; the party marker still shows if it is on." },
+				{ type = "choice", key = "partyMarker", label = "Party marker",
+					choices = function() return { { "left", "Left" }, { "right", "Right" }, { "off", "Off" } } end,
+					tip = "A gold arrow outside the selected party frame, on the side you choose, pointing at it." },
+				{ type = "choice", key = "partyPrompt", label = "Party button prompt",
+					choices = function() return { { "bottom", "Below the party" }, { "top", "Above the party" }, { "off", "Hidden" } } end,
+					onChange = function() ns.UpdatePartyPrompt() end,
+					tip = "Where the {PADDUP}{PADDDOWN} prompt shows with the party frames, or hide it." },
+				{ type = "choice", key = "raidHighlight", label = "Raid highlight", choices = HighlightChoices,
+					tip = "How the selected raid member's frame is marked, with the same choices as the party highlight." },
+				{ type = "choice", key = "highlightColor", label = "Highlight color",
+					choices = function()
+						local choices = {}
+						for _, color in ipairs(ns.HIGHLIGHT_COLORS) do
+							tinsert(choices, { color[1], format("|cff%02x%02x%02x%s|r", math.floor(color[3] * 255), math.floor(color[4] * 255), math.floor(color[5] * 255), color[2]) })
+						end
+						return choices
+					end,
+					onChange = function() Sync() Refresh() end,
+					tip = "The color of the party and raid highlight and the party marker. The Highlight color and Highlight glow choices under Appearance use it too." },
+			},
+		},
+		{
+			name = "Appearance",
+			icon = "Interface\\Icons\\INV_Misc_Gem_Variety_01",
+			rows = {
+				{ type = "header", label = "BARS" },
+				{ type = "choice", key = "theme", label = "Theme",
+					choices = function()
+						local choices = {}
+						for _, theme in ipairs(ns.THEMES) do
+							tinsert(choices, { theme[1], theme[2] })
+						end
+						return choices
+					end,
+					onChange = Refresh,
+					tip = "How the slots look. The theme also sets the background, borders and slot background that are left on From theme." },
+				{ type = "choice", key = "background", label = "Background",
+					choices = function()
+						local choices = { { "theme", "From theme" } }
+						for _, background in ipairs(ns.BACKGROUNDS) do
+							tinsert(choices, { background[1], background[2] })
+						end
+						return choices
+					end,
+					onChange = Refresh,
+					tip = "What is drawn behind each group of four slots. From theme uses the theme's own." },
+				{ type = "choice", key = "backgroundBorder", label = "Background border",
+					choices = function()
+						local choices = { { "theme", "From theme" } }
+						for _, border in ipairs(ns.BACKGROUND_BORDERS) do
+							tinsert(choices, { border[1], border[2] })
+						end
+						return choices
+					end,
+					onChange = Refresh,
+					tip = "A ring around each group of four slots. From theme uses the theme's own." },
+				{ type = "number", key = "backgroundAlpha", label = "Background opacity", min = 0.1, max = 1, step = 0.05, onChange = Refresh,
+					tip = "How solid the background behind each group of four slots is." },
+				{ type = "choice", key = "slotFill", label = "Slot background",
+					choices = function()
+						local choices = { { "theme", "From theme" } }
+						for _, fill in ipairs(ns.SLOT_FILLS) do
+							tinsert(choices, { fill[1], fill[2] })
+						end
+						return choices
+					end,
+					onChange = Refresh,
+					tip = "The fill inside each slot, under the icon. None leaves empty slots see-through. From theme uses the theme's own." },
+				{ type = "choice", key = "slotBorder", label = "Slot border",
+					choices = function()
+						local choices = { { "theme", "From theme" } }
+						for _, border in ipairs(ns.SLOT_BORDERS) do
+							tinsert(choices, { border[1], border[2] })
+						end
+						return choices
+					end,
+					onChange = Refresh,
+					tip = "A border around each slot, in the slot's own shape. From theme uses the theme's own." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "SELECTED BAR" },
+				{ type = "choice", key = "activeHighlight", label = "Selected bar highlight",
+					choices = function()
+						local choices = {}
+						for _, style in ipairs(ns.ACTIVE_STYLES) do
+							tinsert(choices, { style[1], style[2] })
+						end
+						return choices
+					end,
+					onChange = function() ns.RefreshActiveHighlight() end,
+					tip = "How the bar you are using is lit up." },
+				{ type = "number", key = "activeStrength", label = "Selected bar brightness", min = 0.1, max = 1, step = 0.05,
+					onChange = function() ns.RefreshActiveHighlight() end,
+					tip = "How strong the selected bar highlight is." },
+				{ type = "number", key = "activeStrengthCombo", label = "Combo brightness", min = 0.1, max = 1, step = 0.05,
+					onChange = function() ns.RefreshActiveHighlight() end,
+					tip = "How strong the highlight is while {PADLTRIGGER} then {PADRTRIGGER}, or {PADRTRIGGER} then {PADLTRIGGER}, is held." },
+				{ type = "number", key = "flashStrength", label = "Set change flash", min = 0, max = 1, step = 0.05,
+					tip = "How bright the flash over a bar is when its set changes. 0 turns it off." },
+				{ type = "check", key = "pressFeedback", label = "Press feedback",
+					tip = "A slot darkens while its button is held, and flashes red when the ability can't be used." },
+				{ type = "check", key = "activeMarks", label = "Marks in the middle of the selected bar",
+					onChange = function() ns.RefreshActiveHighlight() end,
+					tip = "The small cross and dots between the slots of the bar you are using." },
+				{ type = "choice", key = "activeColorBottom", label = "Bottom bar color", choices = ActiveColorChoices,
+					onChange = function() ns.RefreshActiveHighlight() end,
+					tip = "The highlight color of the bottom bars, while {PADLTRIGGER} or {PADRTRIGGER} is held." },
+				{ type = "choice", key = "activeColorTopLeft", label = "Top left bar color", choices = ActiveColorChoices,
+					onChange = function() ns.RefreshActiveHighlight() end,
+					tip = "The highlight color of the top left bar (double tap {PADLTRIGGER})." },
+				{ type = "choice", key = "activeColorTopRight", label = "Top right bar color", choices = ActiveColorChoices,
+					onChange = function() ns.RefreshActiveHighlight() end,
+					tip = "The highlight color of the top right bar (double tap {PADRTRIGGER})." },
+				{ type = "choice", key = "activeColorCombo", label = "Combo color", choices = ActiveColorChoices,
+					onChange = function() ns.RefreshActiveHighlight() end,
+					tip = "The highlight color while {PADLTRIGGER} then {PADRTRIGGER}, or {PADRTRIGGER} then {PADLTRIGGER}, is held." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "CROSSHAIR" },
+				{ type = "choice", key = "crosshairStyle", label = "Crosshair",
+					choices = function()
+						local choices = {}
+						for _, style in ipairs(ns.CROSSHAIR_STYLES) do
+							tinsert(choices, { style[1], style[2] })
+						end
+						return choices
+					end,
+					onChange = function() ns.RefreshCrosshair() end,
+					tip = "The small mark in the middle of the screen that aims targeting and interacting. Forever's: the game's own. The others are drawn in its place, with the settings below." },
+				{ type = "choice", key = "crosshairColor", label = "Crosshair color", choices = ActiveColorChoices,
+					onChange = function() ns.RefreshCrosshair() end,
+					tip = "The color of the crosshair, when it isn't Forever's." },
+				{ type = "number", key = "crosshairSize", label = "Crosshair size", min = 6, max = 64, step = 2,
+					onChange = function() ns.RefreshCrosshair() end,
+					tip = "How wide the cross or circle is. A dot's size follows the thickness." },
+				{ type = "number", key = "crosshairThickness", label = "Crosshair thickness", min = 1, max = 8, step = 1,
+					onChange = function() ns.RefreshCrosshair() end,
+					tip = "How thick the lines and dots are." },
+				{ type = "number", key = "crosshairAlpha", label = "Crosshair opacity", min = 0.1, max = 1, step = 0.05,
+					onChange = function() ns.RefreshCrosshair() end,
+					tip = "How visible the crosshair is." },
+				{ type = "check", key = "crosshairOutline", label = "Crosshair outline",
+					onChange = function() ns.RefreshCrosshair() end,
+					tip = "A thin dark edge, so the crosshair stays visible on bright ground." },
+			},
+		},
+		{
+			name = "Crossbars",
+			icon = "Interface\\Icons\\INV_Misc_Book_09",
+			forms = true, -- each form's set is added at the end
+			rows = {
+				{ type = "header", label = "LAYOUT" },
+				{ type = "number", key = "scale", label = "Scale", min = 0.5, max = 1.5, step = 0.05,
+					tip = "The size of the whole crossbar." },
+				{ type = "number", key = "x", label = "Horizontal position", min = -1500, max = 1500, step = 10,
+					tip = "Hold Shift while changing it for bigger steps, or drag the bars with Move bars on the General tab." },
+				{ type = "number", key = "y", label = "Vertical position", min = -200, max = 1200, step = 10,
+					tip = "Hold Shift while changing it for bigger steps, or drag the bars with Move bars on the General tab." },
+				{ type = "number", key = "clusterPadding", label = "Padding between button groups", min = -80, max = 80, step = 2,
+					tip = "The gap between the D-pad group and the face button group of each bar. Below 0 brings them closer than normal." },
+				{ type = "number", key = "buttonSpreadX", label = "Button spacing, left / right", min = 0.5, max = 1.5, step = 0.05,
+					tip = "How far apart the left and right buttons of each group are. 1 is the normal spacing." },
+				{ type = "number", key = "buttonSpreadY", label = "Button spacing, up / down", min = 0.5, max = 1.5, step = 0.05,
+					tip = "How far apart the top and bottom buttons of each group are. 1 is the normal spacing." },
+				{ type = "number", key = "dimAlpha", label = "Inactive side opacity", min = 0, max = 1, step = 0.05,
+					tip = "How visible the other bars stay while one is selected. 0 hides them." },
+				{ type = "number", key = "idleAlpha", label = "Idle opacity", min = 0.1, max = 1, step = 0.05,
+					tip = "How visible the bars are out of combat with no trigger held. They come back on a trigger or in combat. 1 never fades them." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "SLOTS" },
+				{ type = "check", key = "showKeyLabels", label = "Show controller buttons on slots", onChange = Refresh,
+					tip = "Shows on each slot the button that uses it." },
+				{ type = "number", key = "keyIconSize", label = "Controller button size", min = 16, max = 60, step = 2, onChange = Refresh,
+					tip = "The size of the button icons on the slots." },
+				{ type = "check", key = "rangeIndicator", label = "Show out of range abilities in red", onChange = Nothing,
+					tip = "Tints an ability red while your target is out of its range." },
+				{ type = "check", key = "showSetLabels", label = "Show set labels", onChange = Refresh,
+					tip = "Each bar's set with its trigger: below the bottom bars and above the top bars. Also the current set under the crossbar." },
+				{ type = "check", key = "showSetPicker", label = "Show the set picker", onChange = Refresh,
+					tip = "While {PADRSHOULDER} is held, a small CHANGE SET box above the crossbar shows which button picks each set. Off: {PADRSHOULDER} still changes sets, without the box." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "TOP ROW AND EXPANDED HOLD" },
+				{ type = "choice", key = "showTopLeft", label = "Top left bar (double tap {PADLTRIGGER})",
+					choices = function() return { { "always", "Always shown" }, { "selected", "Only when selected" }, { "off", "Off" } } end,
+					tip = "Always shown, or hidden until you double tap {PADLTRIGGER} to use it. Off: hidden, and a double tap of {PADLTRIGGER} only selects the bottom bar, so it can't be pressed by mistake." },
+				{ type = "choice", key = "showTopRight", label = "Top right bar (double tap {PADRTRIGGER})",
+					choices = function() return { { "always", "Always shown" }, { "selected", "Only when selected" }, { "off", "Off" } } end,
+					tip = "Always shown, or hidden until you double tap {PADRTRIGGER} to use it. Off: hidden, and a double tap of {PADRTRIGGER} only selects the bottom bar, so it can't be pressed by mistake." },
+				{ type = "choice", key = "sideWL", label = "Double tap {PADLTRIGGER} shows", choices = SideChoices,
+					tip = "Which set's left or right half shows when you double tap {PADLTRIGGER}." },
+				{ type = "choice", key = "sideWR", label = "Double tap {PADRTRIGGER} shows", choices = SideChoices,
+					tip = "Which set's left or right half shows when you double tap {PADRTRIGGER}." },
+				{ type = "choice", key = "sideLR", label = "{PADLTRIGGER} then {PADRTRIGGER} shows", choices = SideChoices,
+					tip = "Which set's left or right half shows when you hold {PADLTRIGGER} then {PADRTRIGGER}." },
+				{ type = "choice", key = "sideRL", label = "{PADRTRIGGER} then {PADLTRIGGER} shows", choices = SideChoices,
+					tip = "Which set's left or right half shows when you hold {PADRTRIGGER} then {PADLTRIGGER}." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "QUICK SET SWAP" },
+				{ type = "check", key = "r1Tap", label = "Quick set swap (tap {PADRSHOULDER})",
+					tip = "A quick tap of {PADRSHOULDER} (about 0.3 seconds), with nothing else pressed, swaps between pair A and pair B below, like FFXIV. Holding {PADRSHOULDER} still picks a set." },
+				{ type = "check", key = "r1TapTop", label = "Include the top row",
+					tip = "Quick set swap. On: the top row changes to the pair's top set too. Off: only the bottom row changes." },
+				{ type = "choice", key = "r1TapBottomA", label = "Pair A: bottom row", choices = SetChoices,
+					tip = "Quick set swap: the set the bottom row shows in pair A, for example your single target abilities." },
+				{ type = "choice", key = "r1TapTopA", label = "Pair A: top row", choices = SetChoices,
+					tip = "Quick set swap: the set the top row (double tap {PADLTRIGGER} / {PADRTRIGGER}) shows in pair A." },
+				{ type = "choice", key = "r1TapBottomB", label = "Pair B: bottom row", choices = SetChoices,
+					tip = "Quick set swap: the set the bottom row shows in pair B, for example your area of effect abilities." },
+				{ type = "choice", key = "r1TapTopB", label = "Pair B: top row", choices = SetChoices,
+					tip = "Quick set swap: the set the top row shows in pair B." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "FORMS AND STANCES" },
+				{ type = "check", key = "formsChangeBar", label = "Forms change the bottom row",
+					tip = "Stealth, cat form, stances and so on each switch the bottom row to a set of their own, chosen below. In a form, {PADRSHOULDER} + a face button picks its set." },
+			},
+		},
+		{
+			name = "Input",
+			icon = "Interface\\Icons\\INV_Gizmo_02",
+			rows = {
+				{ type = "header", label = "TRIGGERS" },
+				{ type = "choice", key = "triggerMode", label = "{PADLTRIGGER} / {PADRTRIGGER} activation",
+					choices = function() return { { "hold", "Hold" }, { "toggle", "Toggle" }, { "mixed", "Mixed" } } end,
+					tip = "Hold: selected while the trigger is held. Toggle: stays selected until pressed again, also after a double tap. Mixed: a tap toggles and a hold holds." },
+				{ type = "check", key = "wxhbReturn", label = "Return to the bottom bar after using the top bar",
+					tip = "After using an ability on a top bar (double tap {PADLTRIGGER} or {PADRTRIGGER}), the bottom bar of that trigger comes back without letting go of the trigger, like FFXIV's \"Return to XHB after WXHB input\"." },
+				{ type = "number", key = "doubleTapTicks", label = "Double tap window", min = 2, max = 6, step = 1,
+					tip = "How long you have for the second tap of a double tap: 2 is about 0.3 seconds, each step adds 0.2. In combat the window can be shorter, as target changes speed up the game's clock. Raise it if double taps are missed. Pressing a trigger again right after using its bar is never a double tap." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "STICKS" },
+				{ type = "choice", key = "l3Action", label = "{PADLSTICK} (press left stick)", choices = StickChoices,
+					tip = "What clicking the left stick in does." },
+				{ type = "choice", key = "r3Action", label = "{PADRSTICK} (press right stick)", choices = StickChoices,
+					tip = "What clicking the right stick in does. With {PADLTRIGGER} or {PADRTRIGGER} held, it still moves or removes an ability." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "BUTTON COMBINATIONS" },
+				{ type = "choice", key = "l1R1Action", label = "{PADLSHOULDER} + {PADRSHOULDER}", choices = L1R1Choices,
+					tip = "What {PADRSHOULDER} does while {PADLSHOULDER} is held. Sheathe by default, which dismounts when mounted and descends when flying. On the world map {PADLSHOULDER} + {PADRSHOULDER} still places a map pin." },
+				{ type = "choice", key = "l1R3Action", label = "{PADLSHOULDER} + {PADRSTICK}", choices = StickChoices,
+					tip = "What {PADRSTICK} does while {PADLSHOULDER} is held. A class menu your class does not have falls back to {PADRSTICK}'s own action." },
+				{ type = "choice", key = "r1L3Action", label = "{PADRSHOULDER} + {PADLSTICK}", choices = StickChoices,
+					tip = "What {PADLSTICK} does while {PADRSHOULDER} is held. A class menu your class does not have falls back to {PADLSTICK}'s own action." },
+				{ type = "choice", key = "r1R3Action", label = "{PADRSHOULDER} + {PADRSTICK}", choices = StickChoices,
+					tip = "What {PADRSTICK} does while {PADRSHOULDER} is held. The Gamepad XIV ring by default." },
+				{ type = "choice", key = "l1StickUpAction", label = "{PADLSHOULDER} + left stick forward", choices = StickChoices,
+					tip = "What pushing the left stick forward does while {PADLSHOULDER} is held. With Auto-run, pressing {PADLSHOULDER} while already moving forward also starts auto-run." },
+				{ type = "choice", key = "l1RightStick", label = "{PADLSHOULDER} + right stick", choices = L1RightStickChoices,
+					tip = "What the right stick does while {PADLSHOULDER} is held: zoom the camera in and out, or turn the camera as it normally does." },
+				{ type = "check", key = "windowCamera", label = "Turn the camera in windows",
+					tip = "With a window open, the right stick turns the camera as usual, also while the cursor is in a list such as the map's quest list, and steers while running. Off: the right stick scrolls lists instead." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "OTHER" },
+				{ type = "check", key = "holdToWalk", label = "Hold {PAD2} to walk",
+					tip = "While {PAD2} is held, the left stick walks instead of runs, like FFXIV." },
+				{ type = "check", key = "priorityBindings", label = "Force the addon's buttons",
+					tip = "Only if holding {PADLTRIGGER} or {PADRTRIGGER} doesn't show the crossbar: the addon's buttons then win over every other binding.\nMenus may stop answering the D-pad and face buttons while it is on; if so, turn it off." },
+			},
+		},
+		{
+			-- Filled by RebuildRingRows from the saved entries.
+			name = "Ring",
+			icon = "Interface\\Icons\\INV_Misc_Map_01",
+			ring = true,
+			rows = {},
+		},
+		{
+			name = "Profiles",
+			icon = "Interface\\Icons\\INV_Misc_Book_09",
+			rows = {
+				{ type = "header", label = "PROFILE" },
+				{ type = "choice", label = "Profile in use",
+					choices = function() return ns.ProfileChoices() end, get = function() return ns.ProfileInUse() end,
+					set = function(name)
+						DisarmProfile()
+						if ns.UseProfile(name) then
+							ns.Print("This character now uses the profile " .. name .. ".")
+						end
+						UpdateRows()
+					end,
+					tip = "The profile whose settings this character uses. Each character starts with one named after it. Characters can share a profile: a change made on one reaches the others at their next login. Your current settings stay in the profile you switch away from." },
+				{ type = "action", label = "New profile", button = "Create", run = NewProfile,
+					tip = "Makes a new profile from your current settings and switches this character to it." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "OTHER PROFILES" },
+				{ type = "choice", label = "Profile",
+					choices = OtherProfiles, get = PickedProfile,
+					set = function(value) profilePick = value; DisarmProfile(); UpdateRows() end,
+					tip = "Pick a profile to copy its settings into the one in use, or to delete it." },
+				{ type = "buttons", label = "", buttons = profileButtons,
+					tip = "Copy to mine replaces the settings of the profile in use with the picked one's; this character keeps its own profile. Delete removes the picked profile; a character still using it makes it again at its next login. Both ask for a second press." },
+				{ type = "spacer", label = "" },
+				{ type = "header", label = "SETTINGS STRING" },
+				{ type = "buttons", label = "Share settings", buttons = {
+						{ text = "Export", run = ExportString },
+						{ text = "Import", run = ImportString },
+					},
+					tip = "Export shows your settings as text to copy and share. Import pastes such text to use those settings. The ring and the abilities on the bars are not included." },
+			},
+		},
+	}
+	for _, tab in ipairs(tabs) do
+		if tab.forms then
+			for _, row in ipairs(formRows) do
+				tinsert(tab.rows, row)
+			end
+		end
+	end
+	for index = #tabs, 1, -1 do
+		if tabs[index].hidden then
+			tremove(tabs, index)
+		end
+	end
+	-- Every choice is a dropdown list; D-pad left / right on the row still steps through it.
+	for _, tab in ipairs(tabs) do
+		for _, row in ipairs(tab.rows) do
+			if row.type == "choice" then
+				row.dropdown = true
+			end
+		end
+	end
+	return tabs
+end
+
+local window, tabs, rowFrames, tabButtons
+local selectedTab, cursor = 1, 1
+local scroll = 0 -- rows scrolled past at the top of a long tab
+-- The rows that fit between the title and the description under them, with a gap above it; a
+-- longer tab scrolls.
+local VISIBLE_ROWS = math.floor((HEIGHT + ROWS_TOP - 130) / ROW_HEIGHT)
+local searchRows -- the rows matching the search text, or nil when not searching
+local searchMore = 0 -- matches left out because they do not fit
+
+-- The rows on screen: the search results while searching, otherwise the selected tab's.
+local function CurrentRows()
+	return searchRows or tabs[selectedTab].rows
+end
+
+local function FormatNumber(value)
+	return tostring(RoundToSignificantDigits(value, 3))
+end
+
+local function ChoiceIndex(row)
+	local choices = row.choices()
+	for i, choice in ipairs(choices) do
+		if choice[1] == (row.get and row.get() or ns.db[row.key]) then
+			return i, choices
+		end
+	end
+	return 1, choices
+end
+
+local function SetValue(row, value)
+	if row.set then
+		row.set(value)
+		return
+	end
+	ns.db[row.key] = value
+	;(row.onChange or Sync)()
+end
+
+-- Changes a row by one step: delta is -1 or 1. Checkboxes flip either way.
+local function StepRow(row, delta, big)
+	if row.type == "buttons" then
+		row.sub = math.max(1, math.min(#row.buttons, (row.sub or 1) + delta))
+	elseif row.type == "check" then
+		SetValue(row, not ns.db[row.key])
+	elseif row.type == "choice" then
+		local index, choices = ChoiceIndex(row)
+		index = (index - 1 + delta) % #choices + 1
+		SetValue(row, choices[index][1])
+	elseif row.type == "number" then
+		local step = row.step * (big and 10 or 1)
+		local value = ns.db[row.key] + delta * step
+		value = math.min(row.max, math.max(row.min, value))
+		-- Steps like 0.05 drift in floating point; snap back to the step grid.
+		value = row.min + math.floor((value - row.min) / row.step + 0.5) * row.step
+		SetValue(row, value)
+	end
+	UpdateRows()
+end
+
+-- The open dropdown list: the row it belongs to and the highlighted choice. The list shows the
+-- choices matching its search box (listChoices), at most LIST_MAX_ITEMS at a time from listOffset.
+local list, listRow, listCursor
+local listChoices, listOffset = {}, 0
+local dialog -- the window for adding a ring entry or naming a ring page
+local LIST_ITEM_HEIGHT = 22
+local LIST_MAX_ITEMS = 14
+local LIST_SEARCH_HEIGHT = 30
+-- Lists longer than this get a search box.
+local LIST_SEARCH_MIN = 8
+
+-- A choice's label with its icon in front, when it has one.
+local function ChoiceText(choice)
+	if choice[3] then
+		return "|T" .. choice[3] .. ":16:16:0:0:64:64:5:59:5:59|t " .. choice[2]
+	end
+	return choice[2]
+end
+
+local function CloseList()
+	if list then
+		list:Hide()
+		list.search:ClearFocus()
+	end
+	listRow = nil
+end
+
+-- The choices whose label contains the search text, ignoring case and color codes.
+local function FilterList()
+	local all = listRow.choices()
+	local text = list.search:IsShown() and strtrim(list.search:GetText() or ""):lower() or ""
+	wipe(listChoices)
+	for _, choice in ipairs(all) do
+		local label = choice[2]:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):lower()
+		if text == "" or label:find(text, 1, true) then
+			tinsert(listChoices, choice)
+		end
+	end
+end
+
+local function UpdateList()
+	if not listRow then
+		return
+	end
+	local count = #listChoices
+	listCursor = math.max(1, math.min(listCursor or 1, count))
+	-- Keep the highlighted choice in view.
+	local shown = math.min(count, LIST_MAX_ITEMS)
+	if listCursor <= listOffset then
+		listOffset = listCursor - 1
+	elseif listCursor > listOffset + shown then
+		listOffset = listCursor - shown
+	end
+	listOffset = math.max(0, math.min(listOffset, count - shown))
+	local currentValue = listRow.get and listRow.get() or ns.db[listRow.key]
+	local top = list.search:IsShown() and LIST_SEARCH_HEIGHT or 0
+	for i = 1, shown do
+		local index = listOffset + i
+		local choice = listChoices[index]
+		local item = list.items[i]
+		if not item then
+			item = CreateFrame("Button", nil, list)
+			item:SetHeight(LIST_ITEM_HEIGHT)
+			item.focus = item:CreateTexture(nil, "BACKGROUND")
+			item.focus:SetAllPoints()
+			item.focus:SetColorTexture(GOLD[1], GOLD[2], GOLD[3], 0.22)
+			item.text = item:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+			item.text:SetPoint("LEFT", 8, 0)
+			item.text:SetPoint("RIGHT", -8, 0)
+			item.text:SetJustifyH("LEFT")
+			item.text:SetWordWrap(false)
+			-- A line above the first choice of a new group.
+			item.separator = item:CreateTexture(nil, "ARTWORK")
+			item.separator:SetHeight(1)
+			item.separator:SetPoint("TOPLEFT", 4, 0)
+			item.separator:SetPoint("TOPRIGHT", -4, 0)
+			item.separator:SetColorTexture(GOLD[1], GOLD[2], GOLD[3], 0.35)
+			item:SetScript("OnEnter", function(self)
+				listCursor = listOffset + self.slot
+				UpdateList()
+			end)
+			item:SetScript("OnClick", function(self)
+				list.Pick(listOffset + self.slot)
+			end)
+			list.items[i] = item
+		end
+		item.slot = i
+		item:ClearAllPoints()
+		item:SetPoint("TOPLEFT", 5, -5 - top - (i - 1) * LIST_ITEM_HEIGHT)
+		item:SetPoint("TOPRIGHT", -5, -5 - top - (i - 1) * LIST_ITEM_HEIGHT)
+		item.text:SetText(ChoiceText(choice))
+		-- The current value is gold, the highlighted one has the gold bar behind it.
+		item.text:SetFontObject(choice[1] == currentValue and "GameFontNormal" or "GameFontHighlight")
+		item.focus:SetShown(index == listCursor)
+		local previous = listChoices[index - 1]
+		item.separator:SetShown(i > 1 and previous ~= nil and choice[4] ~= nil and previous[4] ~= choice[4])
+		item:Show()
+	end
+	for i = shown + 1, #list.items do
+		list.items[i]:Hide()
+	end
+	list.empty:SetShown(count == 0)
+	-- Arrows when there are more choices above or below.
+	list.more:SetText((listOffset > 0 and "|TInterface\\Buttons\\Arrow-Up-Up:14:14|t" or "")
+		.. (listOffset + shown < count and "|TInterface\\Buttons\\Arrow-Down-Up:14:14|t" or ""))
+	list.more:SetShown(count > shown)
+	list:SetHeight(top + math.max(shown, 1) * LIST_ITEM_HEIGHT + 10 + (count > shown and 14 or 0))
+end
+
+local function OpenList(row, anchor)
+	listRow = row
+	listOffset = 0
+	list.search:SetText("")
+	list.search:SetShown(#row.choices() > LIST_SEARCH_MIN)
+	FilterList()
+	listCursor = ChoiceIndex(row)
+	list:ClearAllPoints()
+	list:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -2)
+	list:SetPoint("TOPRIGHT", anchor, "BOTTOMRIGHT", 0, -2)
+	list:Show()
+	UpdateList()
+end
+
+local function ToggleList(row, anchor)
+	if listRow == row then
+		CloseList()
+	else
+		OpenList(row, anchor)
+	end
+end
+
+-- Section titles and notices are read, not selected.
+local function Unselectable(row)
+	return row.type == "header" or row.type == "alert" or row.type == "spacer"
+end
+
+local function ActivateRow(row)
+	if Unselectable(row) then
+		return
+	elseif row.type == "buttons" then
+		row.buttons[row.sub or 1].run()
+	elseif row.type == "action" then
+		row.run()
+	elseif row.dropdown then
+		ToggleList(row, rowFrames[cursor - scroll].dropdown)
+	else
+		StepRow(row, 1)
+	end
+end
+
+-- The flat look: dark panels with thin borders and the gold accent, built from plain textures so it
+-- does not depend on the game's dialog art.
+local WHITE = "Interface\\Buttons\\WHITE8X8"
+local PANEL = { 0.075, 0.075, 0.09, 0.97 }
+local SIDE_PANEL = { 0.05, 0.05, 0.062, 1 }
+local CONTROL = { 0.13, 0.13, 0.16, 1 }
+local CONTROL_HOVER = { 0.19, 0.19, 0.23, 1 }
+local EDGE = { 1, 1, 1, 0.1 }
+
+local function Flat(frame, color, edge)
+	frame:SetBackdrop({ bgFile = WHITE, edgeFile = WHITE, edgeSize = 1 })
+	frame:SetBackdropColor(unpack(color))
+	frame:SetBackdropBorderColor(unpack(edge or EDGE))
+end
+
+-- A flat button: a dark box that lightens and takes a gold edge under the mouse.
+-- Small icons in front of the sidebar buttons' text.
+local RESET_ICON = "|TInterface\\Buttons\\UI-RefreshButton:14:14|t"
+local TUTORIAL_ICON = "|TInterface\\Icons\\INV_Misc_Book_09:16:16:0:0:64:64:5:59:5:59|t"
+
+local function CreateFlatButton(parent, width, height, font)
+	local button = CreateFrame("Button", nil, parent, "BackdropTemplate")
+	button:SetSize(width, height)
+	Flat(button, CONTROL)
+	local text = button:CreateFontString(nil, "OVERLAY", font or "GameFontHighlight")
+	text:SetPoint("CENTER")
+	button:SetFontString(text)
+	button:SetScript("OnEnter", function(self)
+		self:SetBackdropColor(unpack(CONTROL_HOVER))
+		self:SetBackdropBorderColor(GOLD[1], GOLD[2], GOLD[3], 0.7)
+	end)
+	button:SetScript("OnLeave", function(self)
+		self:SetBackdropColor(unpack(CONTROL))
+		self:SetBackdropBorderColor(unpack(EDGE))
+	end)
+	return button
+end
+
+local function CreateArrow(parent, direction)
+	local button = CreateFlatButton(parent, 22, 22, "GameFontNormal")
+	button:SetText(direction < 0 and "<" or ">")
+	return button
+end
+
+-- An on / off switch in place of a checkbox. It keeps SetChecked, so the rows use it the same way.
+local function CreateToggle(parent)
+	local toggle = CreateFrame("Button", nil, parent, "BackdropTemplate")
+	toggle:SetSize(38, 18)
+	Flat(toggle, CONTROL)
+	toggle.knob = toggle:CreateTexture(nil, "OVERLAY")
+	toggle.knob:SetSize(14, 14)
+	toggle.knob:SetTexture(WHITE)
+	function toggle:SetChecked(on)
+		self.knob:ClearAllPoints()
+		if on then
+			self:SetBackdropColor(GOLD[1] * 0.85, GOLD[2] * 0.85, GOLD[3], 1)
+			self:SetBackdropBorderColor(GOLD[1], GOLD[2], GOLD[3], 1)
+			self.knob:SetPoint("RIGHT", -2, 0)
+			self.knob:SetVertexColor(0.08, 0.08, 0.1, 1)
+		else
+			self:SetBackdropColor(unpack(CONTROL))
+			self:SetBackdropBorderColor(1, 1, 1, 0.25)
+			self.knob:SetPoint("LEFT", 2, 0)
+			self.knob:SetVertexColor(0.55, 0.55, 0.6, 1)
+		end
+	end
+	toggle:SetChecked(false)
+	return toggle
+end
+
+-- The mouse wheel over a row with no value to change scrolls a long tab, taking the cursor along.
+local function ScrollRows(delta)
+	local rows = CurrentRows()
+	local newScroll = math.max(0, math.min(scroll + delta, #rows - #rowFrames))
+	if newScroll == scroll then
+		return
+	end
+	scroll = newScroll
+	cursor = math.max(scroll + 1, math.min(cursor, scroll + #rowFrames))
+	while rows[cursor] and Unselectable(rows[cursor]) and cursor < scroll + #rowFrames do
+		cursor = cursor + 1
+	end
+	UpdateRows()
+end
+
+local function CreateRowFrame(index)
+	local frame = CreateFrame("Button", nil, window)
+	frame:SetHeight(ROW_HEIGHT)
+	frame:SetPoint("TOPLEFT", window, "TOPLEFT", 16 + SIDEBAR, ROWS_TOP - (index - 1) * ROW_HEIGHT)
+	frame:SetPoint("RIGHT", window, "RIGHT", -16, 0)
+
+	frame.focus = frame:CreateTexture(nil, "BACKGROUND")
+	frame.focus:SetAllPoints()
+	frame.focus:SetColorTexture(GOLD[1], GOLD[2], GOLD[3], 0.08)
+	-- A faint line between rows.
+	frame.line = frame:CreateTexture(nil, "BACKGROUND", nil, -1)
+	frame.line:SetPoint("BOTTOMLEFT", 8, 0)
+	frame.line:SetPoint("BOTTOMRIGHT", -8, 0)
+	frame.line:SetHeight(1)
+	frame.line:SetColorTexture(1, 1, 1, 0.05)
+	frame.focusBar = frame:CreateTexture(nil, "ARTWORK")
+	frame.focusBar:SetPoint("TOPLEFT")
+	frame.focusBar:SetPoint("BOTTOMLEFT")
+	frame.focusBar:SetWidth(3)
+	frame.focusBar:SetColorTexture(GOLD[1], GOLD[2], GOLD[3], 1)
+
+	-- A notice (type "alert") fills its row and the spacer row under it: a red bar and a large "!" on
+	-- the left, a title, and a line of text with the button icons.
+	frame.alert = CreateFrame("Frame", nil, frame)
+	frame.alert:SetPoint("TOPLEFT", 0, -3)
+	frame.alert:SetPoint("RIGHT")
+	frame.alert:SetHeight(ROW_HEIGHT * 2 - 8)
+	frame.alert:Hide()
+	local back = frame.alert:CreateTexture(nil, "BACKGROUND")
+	back:SetAllPoints()
+	back:SetColorTexture(0.6, 0.08, 0.06, 0.22)
+	local bar = frame.alert:CreateTexture(nil, "ARTWORK")
+	bar:SetPoint("TOPLEFT")
+	bar:SetPoint("BOTTOMLEFT")
+	bar:SetWidth(3)
+	bar:SetColorTexture(1, 0.25, 0.2, 1)
+	frame.alert.mark = frame.alert:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
+	frame.alert.mark:SetPoint("LEFT", 16, 0)
+	frame.alert.mark:SetText("!")
+	frame.alert.mark:SetTextColor(1, 0.3, 0.25)
+	frame.alert.title = frame.alert:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	frame.alert.title:SetPoint("TOPLEFT", 40, -7)
+	frame.alert.title:SetPoint("RIGHT", -12, 0)
+	frame.alert.title:SetJustifyH("LEFT")
+	frame.alert.title:SetTextColor(1, 0.45, 0.4)
+	frame.alert.body = frame.alert:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	frame.alert.body:SetPoint("BOTTOMLEFT", 40, 7)
+	frame.alert.body:SetPoint("RIGHT", -12, 0)
+	frame.alert.body:SetJustifyH("LEFT")
+	frame.alert.body:SetWordWrap(false)
+
+	frame.label = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	frame.label:SetPoint("LEFT", 12, 0)
+	-- Stops before the widest control (the action button), so long search results are cut, not overlapped.
+	frame.label:SetPoint("RIGHT", -240, 0)
+	frame.label:SetJustifyH("LEFT")
+	frame.label:SetWordWrap(false)
+
+	frame.check = CreateToggle(frame)
+	frame.check:SetPoint("RIGHT", -8, 0)
+
+	frame.prev = CreateArrow(frame, -1)
+	frame.next = CreateArrow(frame, 1)
+	frame.next:SetPoint("RIGHT", -4, 0)
+	frame.value = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	frame.value:SetPoint("RIGHT", frame.next, "LEFT", -4, 0)
+	frame.value:SetWidth(170)
+	frame.prev:SetPoint("RIGHT", frame.value, "LEFT", -4, 0)
+
+	-- A dropdown in place of the arrows, for choices with many options.
+	frame.dropdown = CreateFlatButton(frame, 226, 24)
+	frame.dropdown:SetPoint("RIGHT", -4, 0)
+	frame.dropdown.arrow = frame.dropdown:CreateTexture(nil, "OVERLAY")
+	frame.dropdown.arrow:SetSize(14, 14)
+	frame.dropdown.arrow:SetPoint("RIGHT", -7, 0)
+	frame.dropdown.arrow:SetTexture("Interface\\Buttons\\Arrow-Down-Up")
+	frame.dropdown.text = frame.dropdown:GetFontString()
+	frame.dropdown.text:ClearAllPoints()
+	frame.dropdown.text:SetPoint("LEFT", 10, 0)
+	frame.dropdown.text:SetPoint("RIGHT", frame.dropdown.arrow, "LEFT", -4, 0)
+	frame.dropdown.text:SetJustifyH("LEFT")
+	frame.dropdown.text:SetWordWrap(false)
+
+	frame.action = CreateFlatButton(frame, 226, 24)
+	frame.action:SetPoint("RIGHT", -4, 0)
+
+	-- A row of up to three buttons (type "buttons"); D-pad left / right picks one, A presses it.
+	frame.multi = {}
+	for i = 1, 3 do
+		local button = CreateFlatButton(frame, 112, 24)
+		if i == 1 then
+			button:SetPoint("RIGHT", -4, 0)
+		else
+			button:SetPoint("RIGHT", frame.multi[i - 1], "LEFT", -6, 0)
+		end
+		frame.multi[i] = button
+	end
+
+	local function Focus()
+		-- Section titles can't be selected.
+		if frame.row and Unselectable(frame.row) then
+			return
+		end
+		cursor = scroll + index
+		UpdateRows()
+	end
+	frame:SetScript("OnEnter", Focus)
+	frame:EnableMouseWheel(true)
+	frame:SetScript("OnMouseWheel", function(_, delta)
+		local row = frame.row
+		if row and (row.type == "number" or row.type == "choice") then
+			cursor = scroll + index
+			StepRow(row, delta > 0 and 1 or -1, IsShiftKeyDown())
+		else
+			ScrollRows(delta > 0 and -3 or 3)
+		end
+	end)
+	frame:SetScript("OnClick", function()
+		if listRow and listRow ~= frame.row then
+			CloseList()
+		end
+		Focus()
+	end)
+	frame.dropdown:SetScript("OnClick", function()
+		cursor = scroll + index
+		ToggleList(frame.row, frame.dropdown)
+		UpdateRows()
+	end)
+	frame.check:SetScript("OnClick", function()
+		cursor = scroll + index
+		StepRow(frame.row, 1)
+	end)
+	frame.prev:SetScript("OnClick", function()
+		cursor = scroll + index
+		StepRow(frame.row, -1, IsShiftKeyDown())
+	end)
+	frame.next:SetScript("OnClick", function()
+		cursor = scroll + index
+		StepRow(frame.row, 1, IsShiftKeyDown())
+	end)
+	frame.action:SetScript("OnClick", function()
+		cursor = scroll + index
+		frame.row.run()
+	end)
+	for _, child in ipairs({ frame.check, frame.prev, frame.next, frame.action, frame.dropdown }) do
+		child:HookScript("OnEnter", Focus)
+	end
+	-- The buttons are laid out right to left; row.buttons is left to right.
+	for i, button in ipairs(frame.multi) do
+		button:SetScript("OnClick", function()
+			local row = frame.row
+			local n = #row.buttons - i + 1
+			cursor = scroll + index
+			row.sub = n
+			row.buttons[n].run()
+			UpdateRows()
+		end)
+		button:HookScript("OnEnter", function()
+			if frame.row and frame.row.buttons then
+				frame.row.sub = #frame.row.buttons - i + 1
+			end
+			Focus()
+		end)
+	end
+	return frame
+end
+
+function UpdateRows()
+	if not (window and rowFrames and window.scrollBar) then
+		return
+	end
+	local rows = CurrentRows()
+	cursor = math.max(1, math.min(cursor, #rows))
+	-- Never rest on a section title: the next row down, or up at the end.
+	while rows[cursor] and Unselectable(rows[cursor]) and cursor < #rows do
+		cursor = cursor + 1
+	end
+	while rows[cursor] and Unselectable(rows[cursor]) and cursor > 1 do
+		cursor = cursor - 1
+	end
+	-- A long tab scrolls to keep the cursor in view, with the section title above it when moving up.
+	if cursor - scroll > #rowFrames then
+		scroll = cursor - #rowFrames
+	elseif cursor <= scroll then
+		scroll = cursor - 1
+		while scroll > 0 and Unselectable(rows[scroll]) do
+			scroll = scroll - 1
+		end
+	end
+	scroll = math.max(0, math.min(scroll, #rows - #rowFrames))
+	window.scrollBar.Update(#rows)
+	for index, frame in ipairs(rowFrames) do
+		local row = rows[scroll + index]
+		frame.row = row
+		frame:SetShown(row ~= nil)
+		if row then
+			local labelText = row.getLabel and row.getLabel() or row.label
+			if searchRows then
+				frame.label:SetText("|cff8c8c8c" .. row.tabName .. " >|r " .. ButtonText(labelText, 20))
+			else
+				frame.label:SetText(ButtonText(labelText, 20))
+			end
+			-- A section title: gold, smaller, with a stronger line under it and no controls.
+			local header = row.type == "header"
+			-- A notice draws itself over its row and the spacer under it; the spacer draws nothing.
+			local alert = row.type == "alert"
+			frame.alert:SetShown(alert)
+			frame.label:SetShown(not alert and row.type ~= "spacer")
+			frame.line:SetShown(not alert and row.type ~= "spacer")
+			if alert then
+				frame.alert.title:SetText(row.title)
+				frame.alert.body:SetText(ButtonText(row.getBody(), 20))
+			end
+			frame.label:SetFontObject(header and "GameFontNormalSmall" or "GameFontHighlight")
+			frame.line:SetColorTexture(GOLD[1], GOLD[2], GOLD[3], header and 0.35 or 0)
+			if not header then
+				frame.line:SetColorTexture(1, 1, 1, 0.05)
+			end
+			local buttons = row.type == "buttons" and row.buttons or {}
+			row.sub = buttons[1] and math.max(1, math.min(row.sub or 1, #buttons)) or nil
+			for i, button in ipairs(frame.multi) do
+				local data = buttons[#buttons - i + 1]
+				button:SetShown(data ~= nil)
+				if data then
+					button:SetText(data.danger and ("|cffff7070" .. data.text .. "|r") or data.text)
+					local picked = scroll + index == cursor and row.sub == #buttons - i + 1
+					button:SetBackdropBorderColor(GOLD[1], GOLD[2], GOLD[3], picked and 0.9 or 0)
+					if not picked then
+						button:SetBackdropBorderColor(unpack(EDGE))
+					end
+				end
+			end
+			local isFocused = scroll + index == cursor and not header
+			frame.focus:SetShown(isFocused)
+			frame.focusBar:SetShown(isFocused)
+			frame.check:SetShown(row.type == "check")
+			local dropdown = row.type == "choice" and row.dropdown
+			local stepped = (row.type == "choice" or row.type == "number") and not dropdown
+			frame.prev:SetShown(stepped)
+			frame.next:SetShown(stepped)
+			frame.value:SetShown(stepped or row.type == "info")
+			frame.dropdown:SetShown(dropdown and true or false)
+			frame.action:SetShown(row.type == "action")
+			if row.type == "check" then
+				frame.check:SetChecked(ns.db[row.key] and true or false)
+			elseif row.type == "choice" then
+				local choiceIndex, choices = ChoiceIndex(row)
+				local text = choices[choiceIndex][2]
+				-- "From theme" shows the style the theme picks, marked as coming from the theme.
+				if choices[choiceIndex][1] == "theme" and ns.ThemeLook then
+					local picked = ns.ThemeLook(row.key)
+					for _, choice in ipairs(choices) do
+						if choice[1] == picked then
+							text = choice[2] .. " |cff8c8c8c(theme)|r"
+						end
+					end
+				end
+				frame.value:SetText(text)
+				frame.dropdown.text:SetText(choices[choiceIndex][3] and ChoiceText({ nil, text, choices[choiceIndex][3] }) or text)
+			elseif row.type == "number" then
+				frame.value:SetText(FormatNumber(ns.db[row.key]))
+			elseif row.type == "action" then
+				frame.action:SetText(row.button)
+			elseif row.type == "info" then
+				frame.value:SetText(row.value)
+			end
+		end
+	end
+	local row = rows[cursor]
+	local rowTip = row and row.tip
+	if type(rowTip) == "function" then
+		rowTip = rowTip()
+	end
+	local tip = rowTip and ButtonText(rowTip, 19) or ""
+	if searchRows and #rows == 0 then
+		tip = "No settings match the search."
+	elseif searchMore > 0 then
+		tip = format("%d more matches are not shown; type more to narrow the search.\n%s", searchMore, tip)
+	end
+	window.tip:SetText(tip)
+	window.defaults:SetText(RESET_ICON .. "  Reset to defaults")
+	-- Only where there is a setting to reset (not on the Profiles tab).
+	local resettable = false
+	for _, row in ipairs(rows) do
+		resettable = resettable or (row.key ~= nil and ns.DEFAULTS[row.key] ~= nil)
+	end
+	window.defaults:SetShown(resettable)
+	for index, button in ipairs(tabButtons) do
+		local selected = not searchRows and index == selectedTab
+		button.selected:SetShown(selected)
+		button.selectedBar:SetShown(selected)
+		button.text:SetFontObject(selected and "GameFontHighlight" or "GameFontNormal")
+	end
+	if window.UpdatePreview then
+		window.UpdatePreview(rows)
+	end
+end
+
+-- Finds the rows whose label or description contains every word of the text, on all tabs.
+local function Search(text)
+	CloseList()
+	text = strtrim(text or ""):lower()
+	if text == "" then
+		searchRows, searchMore = nil, 0
+	else
+		searchRows, searchMore = {}, 0
+		for _, tab in ipairs(tabs) do
+			for _, row in ipairs(tab.rows) do
+				local haystack = (ButtonText(row.label) .. " " .. ButtonText(type(row.tip) == "string" and row.tip or "") .. " " .. tab.name):lower()
+				local matches = true
+				for word in text:gmatch("%S+") do
+					if not haystack:find(word, 1, true) then
+						matches = false
+						break
+					end
+				end
+				if matches and not Unselectable(row) then
+					row.tabName = tab.name
+					if #searchRows < 100 then
+						tinsert(searchRows, row)
+					else
+						searchMore = searchMore + 1
+					end
+				end
+			end
+		end
+	end
+	cursor = 1
+	UpdateRows()
+end
+
+local function SelectTab(index)
+	CloseList()
+	if searchRows then
+		window.search:SetText("")
+		window.search:ClearFocus()
+		searchRows, searchMore = nil, 0
+	end
+	selectedTab = (index - 1) % #tabs + 1
+	cursor = 1
+	UpdateRows()
+	PlaySound(SOUNDKIT.IG_CHARACTER_INFO_TAB)
+end
+
+local function ResetTab()
+	for _, row in ipairs(CurrentRows()) do
+		if row.key and ns.DEFAULTS[row.key] ~= nil then
+			ns.db[row.key] = ns.DEFAULTS[row.key]
+		end
+	end
+	ns.UpdateMinimapButton()
+	ns.RefreshVisuals()
+	ns.Sync()
+	UpdateRows()
+end
+
+-- Controller: these keys work the window while it is open. The bindings belong to the window and are
+-- cleared when it closes; bindings cannot change in combat, so the window closes when combat starts.
+local NAV_KEYS = {
+	PADDUP = "Up", PADDDOWN = "Down", PADDLEFT = "Left", PADDRIGHT = "Right",
+	PAD1 = "Accept", PAD2 = "Back", PADFORWARD = "Back",
+	PADLSHOULDER = "PrevTab", PADRSHOULDER = "NextTab",
+}
+
+local function CreateNavButtons()
+	local actions = {
+		Up = function()
+			if listRow then
+				if #listChoices > 0 then
+					listCursor = (listCursor - 2) % #listChoices + 1
+					UpdateList()
+				end
+				return
+			end
+			local rows = CurrentRows() local count = #rows if count == 0 then return end
+			repeat cursor = cursor - 1 if cursor < 1 then cursor = count end until not Unselectable(rows[cursor])
+			UpdateRows()
+		end,
+		Down = function()
+			if listRow then
+				if #listChoices > 0 then
+					listCursor = listCursor % #listChoices + 1
+					UpdateList()
+				end
+				return
+			end
+			local rows = CurrentRows() local count = #rows if count == 0 then return end
+			repeat cursor = cursor % count + 1 until not Unselectable(rows[cursor])
+			UpdateRows()
+		end,
+		Left = function() local row = CurrentRows()[cursor] if not listRow and row and row.type ~= "action" then StepRow(row, -1) end end,
+		Right = function() local row = CurrentRows()[cursor] if not listRow and row and row.type ~= "action" then StepRow(row, 1) end end,
+		Accept = function()
+			if listRow then
+				if #listChoices > 0 then
+					list.Pick(listCursor)
+				end
+				return
+			end
+			local row = CurrentRows()[cursor] if row then ActivateRow(row) UpdateRows() end
+		end,
+		-- B closes an open dropdown first, then the window.
+		Back = function()
+			if listRow then
+				CloseList()
+				return
+			end
+			ns.CloseConfig()
+		end,
+		PrevTab = function() SelectTab(selectedTab - 1) end,
+		NextTab = function() SelectTab(selectedTab + 1) end,
+	}
+	for name, action in pairs(actions) do
+		local button = CreateFrame("Button", "GamepadXIVConfigNav" .. name, window)
+		button:RegisterForClicks("AnyDown")
+		button:SetScript("OnClick", function()
+			-- While the add window is open, the controller works that instead.
+			if dialog and dialog:IsShown() then
+				dialog.Nav(name)
+			else
+				action()
+			end
+		end)
+	end
+end
+
+local function BindNav()
+	if InCombatLockdown() then
+		return
+	end
+	for key, name in pairs(NAV_KEYS) do
+		SetOverrideBindingClick(window, true, key, "GamepadXIVConfigNav" .. name, "LeftButton")
+	end
+end
+
+-- Ring tab: pick a page, then one row per segment. Forever's entries on the first three pages are
+-- fixed; free segments take the player's entries. Pages of the player's own can be added, renamed
+-- and removed.
+local function IconMarkup(entry)
+	if entry.atlas and C_Texture.GetAtlasInfo(entry.atlas) then
+		return CreateAtlasMarkup(entry.atlas, 22, 22)
+	end
+	local texture = tonumber(entry.icon) or entry.icon
+	if texture == nil or texture == "" then
+		texture = "Interface\\Icons\\INV_Misc_QuestionMark"
+	end
+	return "|T" .. texture .. ":20:20:0:0:64:64:5:59:5:59|t"
+end
+
+-- Where each segment sits, counter-clockwise from the right, as the ring draws them. The settings
+-- list them clockwise from the top, the way the ring reads.
+local SEGMENT_NAMES = { "Right", "Upper right", "Top", "Upper left", "Left", "Lower left", "Bottom", "Lower right" }
+local SEGMENT_ORDER = { 3, 2, 1, 8, 7, 6, 5, 4 }
+
+local ringEditPage = 2
+local ringResetArmed = false
+local RebuildRingRows
+local function RefreshRing()
+	ns.UpdateRing()
+	RebuildRingRows()
+	UpdateRows()
+end
+
+local OpenEntryDialog, OpenPageDialog
+
+function RebuildRingRows()
+	local ringTab
+	for _, tab in ipairs(tabs) do
+		if tab.ring then
+			ringTab = tab
+		end
+	end
+	if not ringTab then
+		return
+	end
+	local pages = ns.RingPages()
+	ringEditPage = math.max(1, math.min(ringEditPage, #pages))
+	local pageIndex = ringEditPage
+	local pageName = ns.RingPageName(pageIndex)
+	local rows = {
+		{
+			-- Forever's menu button can't be taken over (it is in the game's own gamepad bindings), so
+			-- this says which buttons open the addon's ring, as the Input tab has them now.
+			type = "alert", label = "", title = "The menu button still opens the game's own menu",
+			getBody = function()
+				local combos = {}
+				for _, keys in ipairs(ns.RingKeys and ns.RingKeys() or {}) do
+					local parts = {}
+					for _, key in ipairs(keys) do
+						tinsert(parts, "{" .. key .. "}")
+					end
+					tinsert(combos, table.concat(parts, " + "))
+				end
+				if #combos == 0 then
+					return "Addons can't change {PADFORWARD}. Set a button for this ring in the Input tab."
+				end
+				return "Addons can't change {PADFORWARD}. Open this ring with " .. table.concat(combos, " or ") .. "."
+			end,
+		},
+		{ type = "spacer", label = "" },
+		{ type = "header", label = "RING SETTINGS" },
+		{
+			type = "check", key = "ringReleaseToUse", label = "Use an entry by letting go of the stick",
+			tip = "On: point the right stick at an entry and let go to use it, like Forever's own ring. Off: pointing only highlights the entry and {PAD1} uses it, so nothing opens by accident. {PAD1} works either way.",
+		},
+		{ type = "header", label = "RING PAGES" },
+		{
+			-- Arrows rather than a list, so the page being edited and how many there are always show.
+			type = "choice", dropdown = false, label = format("Editing page  |cffffd100%d|r of %d", pageIndex, #pages),
+			choices = function()
+				local list = {}
+				for index = 1, #ns.db.ringPages do
+					tinsert(list, { index, ns.RingPageName(index) })
+				end
+				return list
+			end,
+			get = function() return ringEditPage end,
+			set = function(value)
+				ringEditPage = value
+				RebuildRingRows()
+			end,
+			tip = "{PADDLEFT} / {PADDRIGHT} switch the page you are editing. In the ring itself ({PADRSHOULDER} + {PADRSTICK} by default), {PADLSHOULDER} / {PADRSHOULDER} turn the pages.",
+		},
+	}
+	local pageButtons = {
+		{ text = "+ New page", run = function() OpenPageDialog(nil) end },
+		{ text = "Rename", run = function() OpenPageDialog(pageIndex) end },
+	}
+	if #pages > 1 then
+		tinsert(pageButtons, { text = "Delete", danger = true, run = function()
+			tremove(pages, pageIndex)
+			ringEditPage = math.max(1, pageIndex - 1)
+			RefreshRing()
+		end })
+	end
+	tinsert(rows, {
+		type = "buttons", label = "This page", buttons = pageButtons,
+		tip = "New page adds an empty page after the others. Rename names the one you are editing; Delete removes it and everything on it. {PADDLEFT} / {PADDRIGHT} pick a button, {PAD1} presses it.",
+	})
+	tinsert(rows, { type = "header", label = "ON " .. pageName:upper() .. "  |cff8c8c8c(clockwise from the top)|r" })
+	for _, segment in ipairs(SEGMENT_ORDER) do
+		local data = pages[pageIndex].slots[segment]
+		local entry = data and ns.RingResolve(data)
+		local where = "|cffb0b0b0" .. SEGMENT_NAMES[segment] .. "|r   "
+		local shown = entry and (IconMarkup(entry) .. "  " .. entry.label .. (data.builtin == "gxiv" and " settings" or "")) or "?"
+		if data then
+			local detail = ""
+			if entry and entry.missing then
+				detail = "  |cffff6060(not loaded)|r"
+			elseif data.command and not data.addon then
+				detail = "  |cff8c8c8c" .. data.command .. "|r"
+			end
+			tinsert(rows, {
+				type = "action",
+				label = where .. shown .. detail,
+				button = "Change...",
+				tip = "Pick something else for this segment, or empty it.",
+				run = function()
+					OpenEntryDialog(pageIndex, segment, entry and entry.label or "this", (data.command and not data.addon) and data or nil)
+				end,
+			})
+		else
+			tinsert(rows, {
+				type = "action",
+				label = where .. "|cff6f6f6fEmpty|r",
+				button = "+ Add",
+				tip = "Puts a game window, an addon, an ability, item, macro, toy, emote or equipment set in this segment.",
+				run = function() OpenEntryDialog(pageIndex, segment) end,
+			})
+		end
+	end
+	tinsert(rows, { type = "header", label = "START OVER" })
+	tinsert(rows, {
+		type = "action", label = "Reset the ring", button = "|cffff7070Reset|r",
+		tip = "Puts back Forever's three main menu pages and removes everything you added. Press twice to confirm.",
+		run = function()
+			if ringResetArmed then
+				ringResetArmed = false
+				ns.RingReset()
+				ringEditPage = 2
+				RefreshRing()
+			else
+				ringResetArmed = true
+				ns.Print("Press Reset again to put the ring back to Forever's pages.")
+				C_Timer.After(5, function() ringResetArmed = false end)
+			end
+		end,
+	})
+	ringTab.rows = rows
+end
+
+-- A window over the settings.
+--   pick:    what goes in a ring segment, from a list with a search box: the game's windows, the
+--            installed addons, this addon's settings and, last, Advanced: a slash command.
+--   command: the Advanced form, a name, a slash command and an optional icon.
+--   page:    a page's name.
+local PICK_ROW_HEIGHT = 36
+local PICK_ROWS = 9
+local GEAR_ICON = "Interface\\Icons\\INV_Misc_Gear_01"
+local EMPTY_ICON = "Interface\\Buttons\\UI-GroupLoot-Pass-Up"
+
+local function CreateDialog()
+	dialog = CreateFrame("Frame", nil, window, "BackdropTemplate")
+	dialog:SetSize(540, 120 + PICK_ROWS * PICK_ROW_HEIGHT)
+	dialog:SetPoint("CENTER")
+	dialog:SetFrameStrata("FULLSCREEN_DIALOG")
+	dialog:EnableMouse(true)
+	Flat(dialog, { 0.08, 0.08, 0.1, 0.99 }, { GOLD[1], GOLD[2], GOLD[3], 0.6 })
+	dialog:Hide()
+
+	dialog.title = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+	dialog.title:SetPoint("TOPLEFT", 16, -14)
+	dialog.title:SetPoint("RIGHT", -16, 0)
+	dialog.title:SetJustifyH("LEFT")
+	dialog.title:SetWordWrap(false)
+
+	-- Pick mode: the search box and the list.
+	local picker = CreateFrame("Frame", nil, dialog)
+	picker:SetPoint("TOPLEFT", 0, -40)
+	picker:SetPoint("BOTTOMRIGHT", 0, 46)
+
+	-- "Select a toy" and the other choices open a window of their own over this one, with its own
+	-- search; the list and its search box move into it while it is open.
+	local subWindow = CreateFrame("Frame", nil, window, "BackdropTemplate")
+	subWindow:SetSize(560, 120 + PICK_ROWS * PICK_ROW_HEIGHT)
+	subWindow:SetPoint("CENTER", dialog, "CENTER", 18, -18)
+	subWindow:SetFrameStrata("FULLSCREEN_DIALOG")
+	subWindow:SetFrameLevel(dialog:GetFrameLevel() + 40)
+	subWindow:EnableMouse(true)
+	Flat(subWindow, { 0.09, 0.09, 0.11, 1 }, { GOLD[1], GOLD[2], GOLD[3], 0.8 })
+	subWindow:Hide()
+	subWindow.title = subWindow:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+	subWindow.title:SetPoint("TOPLEFT", 16, -14)
+	subWindow.title:SetPoint("RIGHT", -16, 0)
+	subWindow.title:SetJustifyH("LEFT")
+	subWindow.title:SetWordWrap(false)
+	subWindow.hint = subWindow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	subWindow.hint:SetPoint("BOTTOMLEFT", 16, 16)
+	subWindow.back = CreateFlatButton(subWindow, 90, 24)
+	subWindow.back:SetPoint("BOTTOMRIGHT", -16, 12)
+	subWindow.back:SetText("Back")
+	subWindow.back:SetScript("OnClick", function() dialog.Nav("Back") end)
+	local search = CreateFrame("EditBox", "GamepadXIVRingPickSearch", picker, "SearchBoxTemplate")
+	search:SetHeight(22)
+	search:SetPoint("TOPLEFT", 22, -4)
+	search:SetPoint("TOPRIGHT", -16, -4)
+	search:SetAutoFocus(false)
+	dialog.search = search
+	local items, shown, pickCursor, pickOffset = {}, {}, 1, 0
+	local folder -- the open section (abilities, bag items, macros, toys), or nil for the main list
+	local rows = {}
+	local empty = picker:CreateFontString(nil, "OVERLAY", "GameFontDisable")
+	empty:SetPoint("TOP", 0, -48)
+	empty:SetText("Nothing matches. Advanced: slash command lets you add anything.")
+	local more = picker:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+	more:SetPoint("BOTTOMRIGHT", -18, -2)
+
+	local function UpdatePicker()
+		local count = #shown
+		pickCursor = math.max(1, math.min(pickCursor, count))
+		local visible = math.min(count, PICK_ROWS)
+		if pickCursor <= pickOffset then
+			pickOffset = pickCursor - 1
+		elseif pickCursor > pickOffset + visible then
+			pickOffset = pickCursor - visible
+		end
+		pickOffset = math.max(0, math.min(pickOffset, count - visible))
+		for i = 1, PICK_ROWS do
+			local row = rows[i]
+			local index = pickOffset + i
+			local item = shown[index]
+			if item then
+				row.icon:SetText(item.markup)
+				row.name:SetText(item.label)
+				row.name:SetFontObject(item.remove and "GameFontRed" or "GameFontHighlight")
+				row.detail:SetText(item.detail or "")
+				row.focus:SetShown(index == pickCursor)
+				local previous = shown[index - 1]
+				row.separator:SetShown(i > 1 and previous ~= nil and previous.group ~= item.group)
+				row:Show()
+			else
+				row:Hide()
+			end
+		end
+		empty:SetShown(count == 0)
+		more:SetText((pickOffset > 0 and "|TInterface\\Buttons\\Arrow-Up-Up:14:14|t" or "")
+			.. (pickOffset + visible < count and "|TInterface\\Buttons\\Arrow-Down-Up:14:14|t" or ""))
+	end
+
+	local function Matches(item, text)
+		return text == "" or item.label:lower():find(text, 1, true) or (item.detail and item.detail:lower():find(text, 1, true))
+	end
+
+	-- In a section: its entries. In the main list: the entries matching the search, and while
+	-- searching, the matching entries inside every section too. Advanced and "empty" always stay,
+	-- so there is a way on with any search.
+	local function Filter()
+		local text = strtrim(search:GetText() or ""):lower()
+		wipe(shown)
+		if folder then
+			for _, item in ipairs(folder.children) do
+				if Matches(item, text) then
+					tinsert(shown, item)
+				end
+			end
+		else
+			local advanced
+			for _, item in ipairs(items) do
+				if item.advanced then
+					advanced = item
+				elseif item.remove or Matches(item, text) then
+					tinsert(shown, item)
+				end
+			end
+			if text ~= "" then
+				for _, item in ipairs(items) do
+					for _, child in ipairs(item.children or {}) do
+						if Matches(child, text) then
+							tinsert(shown, child)
+						end
+					end
+				end
+			end
+			tinsert(shown, advanced)
+		end
+		pickCursor, pickOffset = 1, 0
+		UpdatePicker()
+	end
+	search:HookScript("OnTextChanged", Filter)
+	search:SetScript("OnEnterPressed", function(self)
+		self:ClearFocus()
+	end)
+	search:SetScript("OnEscapePressed", function(self)
+		self:ClearFocus()
+	end)
+
+	local Choose
+	for i = 1, PICK_ROWS do
+		local row = CreateFrame("Button", nil, picker)
+		row:SetHeight(PICK_ROW_HEIGHT)
+		row:SetPoint("TOPLEFT", 12, -32 - (i - 1) * PICK_ROW_HEIGHT)
+		row:SetPoint("TOPRIGHT", -12, -32 - (i - 1) * PICK_ROW_HEIGHT)
+		row.focus = row:CreateTexture(nil, "BACKGROUND")
+		row.focus:SetAllPoints()
+		row.focus:SetColorTexture(GOLD[1], GOLD[2], GOLD[3], 0.18)
+		row.separator = row:CreateTexture(nil, "ARTWORK")
+		row.separator:SetHeight(1)
+		row.separator:SetPoint("TOPLEFT", 4, 0)
+		row.separator:SetPoint("TOPRIGHT", -4, 0)
+		row.separator:SetColorTexture(GOLD[1], GOLD[2], GOLD[3], 0.35)
+		row.icon = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+		row.icon:SetPoint("LEFT", 8, 0)
+		row.icon:SetWidth(32)
+		row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+		row.name:SetPoint("TOPLEFT", 48, -4)
+		row.name:SetPoint("RIGHT", -8, 0)
+		row.name:SetJustifyH("LEFT")
+		row.name:SetWordWrap(false)
+		row.detail = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+		row.detail:SetPoint("BOTTOMLEFT", 48, 5)
+		row.detail:SetPoint("RIGHT", -8, 0)
+		row.detail:SetJustifyH("LEFT")
+		row.detail:SetWordWrap(false)
+		row:SetScript("OnEnter", function()
+			pickCursor = pickOffset + i
+			UpdatePicker()
+		end)
+		row:SetScript("OnClick", function()
+			Choose(shown[pickOffset + i])
+		end)
+		rows[i] = row
+	end
+	picker:EnableMouseWheel(true)
+	picker:SetScript("OnMouseWheel", function(_, delta)
+		pickCursor = math.max(1, math.min(#shown, pickCursor - delta * 3))
+		UpdatePicker()
+	end)
+
+	-- Command mode (Advanced) and page mode: text fields.
+	local form = CreateFrame("Frame", nil, dialog)
+	form:SetPoint("TOPLEFT", 0, -40)
+	form:SetPoint("BOTTOMRIGHT", 0, 46)
+	local fields, shownFields = {}, {}
+	local function Field(key, label, y)
+		local holder = CreateFrame("Frame", nil, form)
+		holder:SetSize(508, 44)
+		holder:SetPoint("TOPLEFT", 16, y)
+		local text = holder:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		text:SetText(label)
+		local box = CreateFrame("EditBox", nil, holder, "BackdropTemplate")
+		box.label, box.defaultLabel = text, label
+		box:SetSize(508, 26)
+		box:SetPoint("TOPLEFT", 0, -16)
+		-- On the box's top edge, so a label with a button icon grows upward, not into the box.
+		text:SetPoint("BOTTOMLEFT", box, "TOPLEFT", 0, 4)
+		Flat(box, CONTROL)
+		box:SetFontObject(ChatFontNormal)
+		box:SetTextInsets(8, 8, 0, 0)
+		box:SetAutoFocus(false)
+		box:SetScript("OnEditFocusGained", function(self) self:SetBackdropBorderColor(GOLD[1], GOLD[2], GOLD[3], 0.9) end)
+		box:SetScript("OnEditFocusLost", function(self) self:SetBackdropBorderColor(unpack(EDGE)) end)
+		box:SetScript("OnEscapePressed", function() dialog.Nav("Back") end)
+		box.holder = holder
+		dialog[key] = box
+		tinsert(fields, box)
+		return box
+	end
+	Field("name", "Name on the ring", -8)
+	Field("command", "Slash command, for example /details or /dbm", -58)
+	Field("icon", "Icon (optional): a texture path such as Interface\\Icons\\INV_Misc_Gear_01, or a file ID", -108)
+	local formHelp = form:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+	formHelp:SetPoint("TOPLEFT", 16, -164)
+	formHelp:SetPoint("RIGHT", -16, 0)
+	formHelp:SetJustifyH("LEFT")
+	local COMMAND_HELP = "Runs the command as if you typed it in chat. Most addons list theirs in their description or with /help."
+	formHelp:SetText(COMMAND_HELP)
+
+	dialog.error = dialog:CreateFontString(nil, "OVERLAY", "GameFontRedSmall")
+	dialog.error:SetPoint("BOTTOMLEFT", 16, 52)
+	dialog.error:SetPoint("RIGHT", -16, 0)
+	dialog.error:SetJustifyH("LEFT")
+
+	-- Footer: the controller hint on the left, the buttons on the right.
+	local hint = dialog:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	hint:SetPoint("BOTTOMLEFT", 16, 16)
+	local add = CreateFlatButton(dialog, 90, 24)
+	add:SetPoint("BOTTOMRIGHT", -16, 12)
+	dialog.add = add
+	local cancel = CreateFlatButton(dialog, 90, 24)
+	cancel:SetPoint("RIGHT", add, "LEFT", -8, 0)
+	cancel:SetScript("OnClick", function() dialog.Nav("Back") end)
+
+	local function Place(data)
+		local pages = ns.RingPages()
+		pages[dialog.pageIndex].slots[dialog.segment] = data
+		dialog:Hide()
+		RefreshRing()
+	end
+
+	local function Layout()
+		local mode = dialog.mode
+		picker:SetShown(mode == "pick")
+		form:SetShown(mode ~= "pick")
+		add:SetShown(mode ~= "pick")
+		cancel:SetText((mode == "command" or folder) and "Back" or "Cancel")
+		cancel:ClearAllPoints()
+		if mode == "pick" then
+			cancel:SetPoint("BOTTOMRIGHT", -16, 12)
+		else
+			cancel:SetPoint("RIGHT", add, "LEFT", -8, 0)
+		end
+		wipe(shownFields)
+		for _, box in ipairs(fields) do
+			local show = mode == "command" or ((mode == "page" or mode == "text") and box == dialog.name)
+			box.holder:SetShown(show)
+			if show then
+				tinsert(shownFields, box)
+			end
+		end
+		formHelp:SetShown(mode == "command" or (mode == "text" and dialog.textHelp ~= nil))
+		formHelp:SetText(mode == "text" and ButtonText(dialog.textHelp or "", 16) or COMMAND_HELP)
+		-- A text field's label may name a button, drawn as its icon.
+		dialog.name.label:SetText(mode == "text" and ButtonText(dialog.textLabel or "", 12) or dialog.name.defaultLabel)
+		if mode == "pick" then
+			hint:SetText(ButtonText("{PADDUP}{PADDDOWN} choose   {PAD1} select   {PAD2} " .. (folder and "back" or "cancel"), 18))
+			for _, box in ipairs(fields) do
+				box:ClearFocus()
+			end
+		else
+			hint:SetText(ButtonText("{PAD1} " .. (mode == "text" and (dialog.textButton or "Save"):lower() or mode == "page" and "save" or "add") .. "   {PAD2} " .. (mode == "command" and "back" or "cancel"), 18))
+			search:ClearFocus()
+			if shownFields[1] and not (shownFields[1]:HasFocus() or (shownFields[2] and shownFields[2]:HasFocus()) or (shownFields[3] and shownFields[3]:HasFocus())) then
+				shownFields[1]:SetFocus()
+			end
+		end
+		dialog.error:SetText("")
+	end
+
+	local function Submit()
+		if dialog.mode == "text" then
+			local text = strtrim(dialog.name:GetText()):gsub("|", "")
+			if text == "" then
+				dialog.error:SetText("Type something, or press Cancel.")
+				return
+			end
+			dialog:Hide()
+			dialog.onTextSave(text)
+			return
+		end
+		local name = strtrim(dialog.name:GetText()):gsub("|", "")
+		if dialog.mode == "page" then
+			local pages = ns.RingPages()
+			if name == "" then
+				dialog.error:SetText("Give the page a name.")
+				return
+			end
+			if dialog.pageIndex then
+				pages[dialog.pageIndex].name = name
+			else
+				tinsert(pages, { name = name, slots = {} })
+				ringEditPage = #pages
+			end
+			dialog:Hide()
+			RefreshRing()
+			return
+		end
+		local command = strtrim(dialog.command:GetText())
+		local icon = strtrim(dialog.icon:GetText()):gsub("|", "")
+		if name == "" then
+			dialog.error:SetText("Give the entry a name.")
+			return
+		end
+		if not command:match("^/%S") then
+			dialog.error:SetText("The command starts with /, like /details.")
+			return
+		end
+		Place({ label = name, command = command, icon = icon ~= "" and icon or nil })
+	end
+	dialog.Submit = Submit
+	add:SetScript("OnClick", Submit)
+
+	function Choose(item)
+		if not item then
+			return
+		end
+		if item.advanced then
+			dialog.mode = "command"
+			Layout()
+			return
+		end
+		if item.children then
+			dialog.OpenFolder(item)
+			return
+		end
+		Place(item.data)
+	end
+	dialog.Choose = function() Choose(shown[pickCursor]) end
+
+	-- Tab and Enter move through the fields; Enter on the last one submits.
+	for _, box in ipairs(fields) do
+		box:SetScript("OnTabPressed", function()
+			local n = tIndexOf(shownFields, box) or 0
+			shownFields[n % #shownFields + 1]:SetFocus()
+		end)
+		box:SetScript("OnEnterPressed", function()
+			local n = tIndexOf(shownFields, box) or #shownFields
+			if shownFields[n + 1] then
+				shownFields[n + 1]:SetFocus()
+			else
+				Submit()
+			end
+		end)
+	end
+
+	-- The controller. In the list: up / down choose, left / right jump a screen, A adds, B cancels.
+	-- In the fields: up / down move between them, A adds or saves, B goes back to the list or closes.
+	dialog.Nav = function(name)
+		if dialog.mode == "pick" then
+			local count = #shown
+			if (name == "Up" or name == "Down") and count > 0 then
+				pickCursor = (pickCursor - 1 + (name == "Up" and -1 or 1)) % count + 1
+				UpdatePicker()
+			elseif (name == "Left" or name == "Right") and count > 0 then
+				pickCursor = math.max(1, math.min(count, pickCursor + (name == "Left" and -PICK_ROWS or PICK_ROWS)))
+				UpdatePicker()
+			elseif name == "Accept" then
+				dialog.Choose()
+			elseif name == "Back" then
+				if folder then
+					dialog.CloseFolder()
+				else
+					dialog:Hide()
+				end
+			end
+			return
+		end
+		local focused = 1
+		for n, box in ipairs(shownFields) do
+			if box:HasFocus() then
+				focused = n
+			end
+		end
+		if (name == "Up" or name == "Down") and #shownFields > 0 then
+			local step = name == "Up" and -2 or 0
+			shownFields[(focused + step) % #shownFields + 1]:SetFocus()
+		elseif name == "Accept" then
+			Submit()
+		elseif name == "Back" then
+			if dialog.mode == "command" then
+				dialog.mode = "pick"
+				Layout()
+			else
+				dialog:Hide()
+			end
+		end
+	end
+	local function PlacePicker(parent)
+		picker:SetParent(parent)
+		picker:ClearAllPoints()
+		picker:SetPoint("TOPLEFT", 0, -40)
+		picker:SetPoint("BOTTOMRIGHT", 0, 46)
+	end
+	function dialog.OpenFolder(item)
+		folder = item
+		PlacePicker(subWindow)
+		subWindow.title:SetText(item.name .. "  |cff8c8c8c·  " .. SEGMENT_NAMES[dialog.segment] .. "|r")
+		subWindow.hint:SetText(ButtonText("{PADDUP}{PADDDOWN} choose   {PAD1} add   {PAD2} back", 18))
+		dialog:SetAlpha(0.45)
+		subWindow:Show()
+		search:SetText("")
+		Filter()
+	end
+	-- Back to the main list; quiet when the add window itself closes.
+	function dialog.CloseFolder(quiet)
+		folder = nil
+		PlacePicker(dialog)
+		subWindow:Hide()
+		dialog:SetAlpha(1)
+		if not quiet then
+			search:SetText("")
+			Filter()
+			Layout()
+		end
+	end
+	dialog:SetScript("OnHide", function()
+		for _, box in ipairs(fields) do
+			box:ClearFocus()
+		end
+		search:ClearFocus()
+		if folder then
+			dialog.CloseFolder(true)
+		end
+	end)
+
+	-- Everything that can go in a segment, in groups: the game's windows, the installed addons, this
+	-- addon's settings, then Advanced. Changing a filled segment offers to empty it first.
+	local function BuildItems(current)
+		wipe(items)
+		if current then
+			tinsert(items, { group = "remove", remove = true, label = "Empty this segment",
+				detail = "Takes " .. current .. " off the ring", markup = "|T" .. EMPTY_ICON .. ":26:26|t", data = nil })
+		end
+		for _, key in ipairs(ns.RING_BUILTIN_ORDER) do
+			local entry = key ~= "gxiv" and ns.RingResolve(key)
+			if entry then
+				tinsert(items, { group = "game", label = entry.label, detail = "Game window", markup = IconMarkup(entry), data = { builtin = key } })
+			end
+		end
+		-- Sections, each opening a list of its own; empty ones are left out.
+		local sections = {
+			{ "Select a toy", "toys", "Interface\\Icons\\INV_Misc_Toy_10", ns.RingToyChoices, "toys, or the whole Toy Box" },
+			{ "Select a macro", "macros", "Interface\\Icons\\INV_Misc_Note_01", ns.RingMacroChoices, "account and character macros" },
+			{ "Select an item", "items", "Interface\\Icons\\INV_Misc_Bag_08", ns.RingItemChoices, "items in your bags" },
+			{ "Select an ability", "abilities", "Interface\\Icons\\INV_Misc_Book_09", ns.RingSpellChoices, "abilities, at the highest rank you know" },
+			{ "Select an emote", "emotes", "Interface\\Icons\\Spell_Shadow_Charm", ns.RingEmoteChoices, "emotes" },
+			{ "Select an equipment", "equipment", "Interface\\Icons\\INV_Chest_Chain", ns.RingEquipmentSetChoices, "sets from the Equipment Manager" },
+		}
+		for _, section in ipairs(sections) do
+			local children = {}
+			for _, choice in ipairs(section[4]()) do
+				tinsert(children, { group = section[2], label = choice.label, detail = choice.detail,
+					markup = IconMarkup({ icon = choice.icon }), data = choice.data })
+			end
+			-- The Toy Box itself comes first: one entry that opens every toy on the ring.
+			if section[2] == "toys" and #children > 0 then
+				tinsert(children, 1, { group = "toybox", label = "Toy Box", detail = "All your toys on the ring, 8 a page",
+					markup = "|TInterface\\Icons\\INV_Misc_Toy_10:26:26:0:0:64:64:5:59:5:59|t", data = { toybox = true } })
+			end
+			if #children > 0 then
+				tinsert(items, { group = "sections", name = section[1], children = children,
+					label = section[1] .. "  |TInterface\\ChatFrame\\ChatFrameExpandArrow:14:14|t",
+					detail = (section[2] == "toys" and (#children - 1) or #children) .. " " .. section[5], markup = "|T" .. section[3] .. ":26:26:0:0:64:64:5:59:5:59|t" })
+			end
+		end
+		for _, addon in ipairs(ns.RingAddOnChoices()) do
+			local markup = IconMarkup({ icon = addon.icon })
+			tinsert(items, { group = "addon", label = addon.label, detail = addon.detail, markup = markup, data = addon.data })
+		end
+		local settings = ns.RingResolve("gxiv")
+		tinsert(items, { group = "gxiv", label = settings.label .. " settings", detail = "This window", markup = IconMarkup(settings), data = { builtin = "gxiv" } })
+		tinsert(items, { group = "advanced", advanced = true, label = "Advanced: slash command",
+			detail = "Type a command yourself, for an addon not listed here", markup = "|T" .. GEAR_ICON .. ":26:26:0:0:64:64:5:59:5:59|t" })
+	end
+
+	local function Open(mode, title, button)
+		CloseList()
+		dialog.mode = mode
+		dialog.title:SetText(title)
+		add:SetText(button)
+		for _, box in ipairs(fields) do
+			box:SetText("")
+			box:ClearFocus()
+		end
+		search:SetText("")
+		dialog:Show()
+		Layout()
+	end
+
+	-- current: the label of what the segment holds now, to offer emptying it; custom: a slash
+	-- command entry of the player's, to fill the Advanced form with.
+	function OpenEntryDialog(pageIndex, segment, current, custom)
+		dialog.pageIndex, dialog.segment = pageIndex, segment
+		BuildItems(current)
+		local verb = current and "Change" or "Add to"
+		folder = nil
+		dialog.baseTitle = verb .. " " .. ns.RingPageName(pageIndex) .. "  |cff8c8c8c·  " .. SEGMENT_NAMES[segment] .. "|r"
+		Open("pick", dialog.baseTitle, "Add")
+		Filter()
+		if custom then
+			dialog.name:SetText(custom.label or "")
+			dialog.command:SetText(custom.command or "")
+			dialog.icon:SetText(custom.icon and tostring(custom.icon) or "")
+		end
+	end
+
+	-- A single line of text for a setting: title, the field's label, the current text, a help line
+	-- under it and what to do with the saved text.
+	-- button names the save button; select highlights the text, for copying it.
+	function OpenTextDialog(title, label, value, help, onSave, button, select)
+		dialog.textLabel, dialog.textHelp, dialog.onTextSave, dialog.textButton = label, help, onSave, button
+		Open("text", title, button or "Save")
+		dialog.name:SetMaxLetters(0)
+		dialog.name:SetMaxBytes(0)
+		dialog.name:SetText(value or "")
+		dialog.name:SetCursorPosition(0)
+		if select then
+			dialog.name:SetFocus()
+			dialog.name:HighlightText()
+		end
+	end
+
+	function OpenPageDialog(pageIndex)
+		dialog.pageIndex = pageIndex or false
+		Open("page", pageIndex and "Rename the page" or "Add a page", pageIndex and "Save" or "Add")
+		if pageIndex then
+			dialog.name:SetText(ns.RingPageName(pageIndex))
+		end
+	end
+end
+
+-- For profiles and settings strings: whether a value fits its setting's row, and the value to use.
+-- A choice must be one of the row's values; a number is kept inside the row's range, and whole for
+-- rows that step by 1. Settings without a row pass as they are.
+local rowsByKey
+function ns.ValidSetting(key, value)
+	if not rowsByKey then
+		rowsByKey = {}
+		for _, tab in ipairs(BuildTabs()) do
+			for _, row in ipairs(tab.rows) do
+				if row.key then
+					rowsByKey[row.key] = row
+				end
+			end
+		end
+	end
+	local row = rowsByKey[key]
+	if not row then
+		return true, value
+	elseif row.type == "choice" then
+		for _, choice in ipairs(row.choices()) do
+			if choice[1] == value then
+				return true, value
+			end
+		end
+		return false
+	elseif row.type == "number" then
+		if row.step == 1 then
+			value = math.floor(value + 0.5)
+		end
+		return true, math.max(row.min, math.min(row.max, value))
+	end
+	return true, value
+end
+
+-- A live preview of the crosshair beside the window, shown while a crosshair setting is on screen:
+-- a small scene, bright sky above and dark ground below, with the crosshair drawn over the horizon
+-- exactly as it will look in the game.
+local PREVIEW_WIDTH, PREVIEW_VIEW = 236, 212
+
+local function Gradient(texture, bottom, top)
+	texture:SetTexture(WHITE)
+	if CreateColor and texture.SetGradient then
+		texture:SetGradient("VERTICAL", CreateColor(unpack(bottom)), CreateColor(unpack(top)))
+	elseif texture.SetGradientAlpha then
+		texture:SetGradientAlpha("VERTICAL", bottom[1], bottom[2], bottom[3], bottom[4], top[1], top[2], top[3], top[4])
+	end
+end
+
+local function StyleName(key)
+	for _, style in ipairs(ns.CROSSHAIR_STYLES or {}) do
+		if style[1] == key then
+			return style[2]
+		end
+	end
+	return key
+end
+
+local function CreatePreview()
+	local panel = CreateFrame("Frame", nil, window, "BackdropTemplate")
+	Flat(panel, PANEL, { GOLD[1], GOLD[2], GOLD[3], 0.35 })
+	panel:SetSize(PREVIEW_WIDTH, TITLE_HEIGHT + 12 + PREVIEW_VIEW + 58)
+	panel:EnableMouse(true)
+	panel:Hide()
+
+	local titleBar = panel:CreateTexture(nil, "BACKGROUND", nil, 1)
+	titleBar:SetPoint("TOPLEFT", 1, -1)
+	titleBar:SetPoint("TOPRIGHT", -1, -1)
+	titleBar:SetHeight(TITLE_HEIGHT)
+	titleBar:SetColorTexture(0.1, 0.1, 0.125, 1)
+	local titleLine = panel:CreateTexture(nil, "ARTWORK")
+	titleLine:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT")
+	titleLine:SetPoint("TOPRIGHT", titleBar, "BOTTOMRIGHT")
+	titleLine:SetHeight(1)
+	titleLine:SetColorTexture(GOLD[1], GOLD[2], GOLD[3], 0.35)
+	local title = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	title:SetPoint("LEFT", titleBar, "LEFT", 12, 0)
+	title:SetText("Crosshair preview")
+
+	-- The scene.
+	local view = CreateFrame("Frame", nil, panel, "BackdropTemplate")
+	view:SetSize(PREVIEW_VIEW, PREVIEW_VIEW)
+	view:SetPoint("TOP", panel, "TOP", 0, -TITLE_HEIGHT - 12)
+	view:SetClipsChildren(true)
+	local horizon = math.floor(PREVIEW_VIEW * 0.5)
+	local sky = view:CreateTexture(nil, "BACKGROUND", nil, 1)
+	sky:SetPoint("TOPLEFT")
+	sky:SetPoint("TOPRIGHT")
+	sky:SetHeight(PREVIEW_VIEW - horizon)
+	Gradient(sky, { 0.86, 0.80, 0.66, 1 }, { 0.36, 0.55, 0.78, 1 })
+	local ground = view:CreateTexture(nil, "BACKGROUND", nil, 1)
+	ground:SetPoint("BOTTOMLEFT")
+	ground:SetPoint("BOTTOMRIGHT")
+	ground:SetHeight(horizon)
+	Gradient(ground, { 0.06, 0.07, 0.05, 1 }, { 0.22, 0.25, 0.15, 1 })
+	-- A soft haze along the horizon.
+	local haze = view:CreateTexture(nil, "BACKGROUND", nil, 2)
+	haze:SetPoint("BOTTOMLEFT", ground, "TOPLEFT")
+	haze:SetPoint("BOTTOMRIGHT", ground, "TOPRIGHT")
+	haze:SetHeight(18)
+	Gradient(haze, { 1, 0.95, 0.85, 0.35 }, { 1, 0.95, 0.85, 0 })
+	-- Darker corners, like a game camera.
+	local shade = 0.45
+	local edges = {
+		{ "TOPLEFT", "TOPRIGHT", nil, 40, { 0, 0, 0, 0 }, { 0, 0, 0, shade } },
+		{ "BOTTOMLEFT", "BOTTOMRIGHT", nil, 40, { 0, 0, 0, shade }, { 0, 0, 0, 0 } },
+	}
+	for _, edge in ipairs(edges) do
+		local texture = view:CreateTexture(nil, "BACKGROUND", nil, 3)
+		texture:SetPoint(edge[1])
+		texture:SetPoint(edge[2])
+		texture:SetHeight(edge[4])
+		Gradient(texture, edge[5], edge[6])
+	end
+	local border = panel:CreateTexture(nil, "ARTWORK")
+	border:SetPoint("TOPLEFT", view, "TOPLEFT", -1, 1)
+	border:SetPoint("BOTTOMRIGHT", view, "BOTTOMRIGHT", 1, -1)
+	border:SetColorTexture(1, 1, 1, 0.15)
+
+	-- The middle of the scene, where the crosshair goes.
+	local middle = CreateFrame("Frame", nil, view)
+	middle:SetSize(1, 1)
+	middle:SetPoint("CENTER")
+	local canvas = ns.CreateCrosshairPreview and ns.CreateCrosshairPreview(middle)
+	local note = view:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	note:SetPoint("CENTER")
+	note:SetShadowOffset(1, -1)
+
+	local name = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	name:SetPoint("TOPLEFT", view, "BOTTOMLEFT", 2, -12)
+	local detail = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+	detail:SetPoint("TOPLEFT", name, "BOTTOMLEFT", 0, -5)
+	local swatch = panel:CreateTexture(nil, "ARTWORK")
+	swatch:SetSize(12, 12)
+	swatch:SetPoint("TOPRIGHT", view, "BOTTOMRIGHT", -2, -14)
+	local swatchEdge = panel:CreateTexture(nil, "BORDER")
+	swatchEdge:SetPoint("TOPLEFT", swatch, -1, 1)
+	swatchEdge:SetPoint("BOTTOMRIGHT", swatch, 1, -1)
+	swatchEdge:SetColorTexture(1, 1, 1, 0.3)
+
+	-- Beside the window on the right, or on the left when the screen ends first.
+	local function Dock()
+		panel:ClearAllPoints()
+		local right = window:GetRight()
+		local room = UIParent:GetRight()
+		if right and room and (right + 10 + PREVIEW_WIDTH) * window:GetEffectiveScale() > room * UIParent:GetEffectiveScale() then
+			panel:SetPoint("TOPRIGHT", window, "TOPLEFT", -10, 0)
+		else
+			panel:SetPoint("TOPLEFT", window, "TOPRIGHT", 10, 0)
+		end
+	end
+
+	function window.UpdatePreview(rows)
+		local wanted = false
+		for index = scroll + 1, scroll + #rowFrames do
+			local row = rows[index]
+			if row and type(row.key) == "string" and row.key:find("^crosshair") then
+				wanted = true
+				break
+			end
+		end
+		panel:SetShown(wanted)
+		if not wanted then
+			return
+		end
+		Dock()
+		local db = ns.db
+		local style = db.crosshairStyle or "forever"
+		if canvas then
+			ns.DrawCrosshairPreview(canvas)
+		end
+		if style == "forever" then
+			note:SetText("Forever's own crosshair")
+		elseif style == "none" then
+			note:SetText("No crosshair")
+		else
+			note:SetText("")
+		end
+		name:SetText(StyleName(style))
+		local custom = style ~= "forever" and style ~= "none"
+		if custom then
+			detail:SetText(string.format("Size %d \194\183 thickness %d \194\183 %d%%",
+				db.crosshairSize or 16, db.crosshairThickness or 2, math.floor((db.crosshairAlpha or 1) * 100 + 0.5)))
+			swatch:SetColorTexture(ns.ColorByKey(db.crosshairColor or "white"))
+		else
+			detail:SetText("Pick a style to draw your own.")
+		end
+		swatch:SetShown(custom)
+		swatchEdge:SetShown(custom)
+	end
+	-- The window can be dragged: keep the crosshair on whole pixels as it moves.
+	window:HookScript("OnDragStop", function()
+		if panel:IsShown() then
+			window.UpdatePreview(CurrentRows())
+		end
+	end)
+end
+
+local function CreateWindow()
+	tabs = BuildTabs()
+	window = CreateFrame("Frame", "GamepadXIVConfigFrame", UIParent, "BackdropTemplate")
+	Flat(window, PANEL, { GOLD[1], GOLD[2], GOLD[3], 0.35 })
+	window:SetSize(WIDTH, HEIGHT)
+	window:SetPoint("CENTER")
+	window:SetFrameStrata("DIALOG")
+	window:SetToplevel(true)
+	window:SetClampedToScreen(true)
+	window:EnableMouse(true)
+	window:SetMovable(true)
+	window:RegisterForDrag("LeftButton")
+	window:SetScript("OnDragStart", window.StartMoving)
+	window:SetScript("OnDragStop", window.StopMovingOrSizing)
+	window:Hide()
+
+	-- The title bar: the addon's icon and name, and a close button.
+	local titleBar = window:CreateTexture(nil, "BACKGROUND", nil, 1)
+	titleBar:SetPoint("TOPLEFT", 1, -1)
+	titleBar:SetPoint("TOPRIGHT", -1, -1)
+	titleBar:SetHeight(TITLE_HEIGHT)
+	titleBar:SetColorTexture(0.1, 0.1, 0.125, 1)
+	local titleLine = window:CreateTexture(nil, "ARTWORK")
+	titleLine:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT")
+	titleLine:SetPoint("TOPRIGHT", titleBar, "BOTTOMRIGHT")
+	titleLine:SetHeight(1)
+	titleLine:SetColorTexture(GOLD[1], GOLD[2], GOLD[3], 0.35)
+	local titleIcon = window:CreateTexture(nil, "ARTWORK")
+	titleIcon:SetSize(20, 20)
+	titleIcon:SetPoint("LEFT", titleBar, "LEFT", 12, 0)
+	titleIcon:SetTexture(ns.ICON)
+	local title = window:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+	title:SetPoint("LEFT", titleIcon, "RIGHT", 8, 0)
+	title:SetText("Gamepad XIV")
+	local close = CreateFlatButton(window, 24, 24, "GameFontNormal")
+	close:SetPoint("RIGHT", titleBar, "RIGHT", -6, 0)
+	close:SetText("X")
+	close:SetScript("OnClick", function() window:Hide() end)
+
+	RebuildRingRows()
+	rowFrames = {}
+	for index = 1, VISIBLE_ROWS do
+		rowFrames[index] = CreateRowFrame(index)
+	end
+	-- A scrollbar beside the rows of a long tab: drag or click it, or use the mouse wheel on it.
+	local bar = CreateFrame("Frame", nil, window)
+	bar:SetPoint("TOPLEFT", rowFrames[1], "TOPRIGHT", 4, 0)
+	bar:SetPoint("BOTTOMLEFT", rowFrames[#rowFrames], "BOTTOMRIGHT", 4, 0)
+	bar:SetWidth(6)
+	bar.track = bar:CreateTexture(nil, "BACKGROUND")
+	bar.track:SetAllPoints()
+	bar.track:SetColorTexture(1, 1, 1, 0.08)
+	bar.thumb = bar:CreateTexture(nil, "ARTWORK")
+	bar.thumb:SetPoint("LEFT")
+	bar.thumb:SetPoint("RIGHT")
+	bar.thumb:SetColorTexture(GOLD[1], GOLD[2], GOLD[3], 0.6)
+	bar.rowCount = 0
+	function bar.Update(rowCount)
+		bar.rowCount = rowCount
+		local visible = #rowFrames
+		bar:SetShown(rowCount > visible)
+		if rowCount <= visible then
+			return
+		end
+		local height = visible * ROW_HEIGHT
+		bar.thumbHeight = math.max(24, height * visible / rowCount)
+		local offset = (height - bar.thumbHeight) * scroll / (rowCount - visible)
+		bar.thumb:SetHeight(bar.thumbHeight)
+		bar.thumb:SetPoint("TOP", 0, -offset)
+	end
+	-- The row scrolled to when the thumb's middle is at the mouse.
+	local function ScrollToMouse()
+		local visible = #rowFrames
+		local height = visible * ROW_HEIGHT
+		local _, y = GetCursorPosition()
+		y = y / bar:GetEffectiveScale()
+		local fraction = (bar:GetTop() - y - bar.thumbHeight / 2) / math.max(1, height - bar.thumbHeight)
+		fraction = math.max(0, math.min(1, fraction))
+		local target = math.floor(fraction * (bar.rowCount - visible) + 0.5)
+		ScrollRows(target - scroll)
+	end
+	bar:EnableMouse(true)
+	bar:SetScript("OnMouseDown", function()
+		bar.dragging = true
+		ScrollToMouse()
+	end)
+	bar:SetScript("OnMouseUp", function()
+		bar.dragging = nil
+	end)
+	bar:SetScript("OnHide", function()
+		bar.dragging = nil
+	end)
+	bar:SetScript("OnUpdate", function()
+		if bar.dragging then
+			if not IsMouseButtonDown("LeftButton") then
+				bar.dragging = nil
+				return
+			end
+			ScrollToMouse()
+		end
+	end)
+	bar:EnableMouseWheel(true)
+	bar:SetScript("OnMouseWheel", function(_, delta)
+		ScrollRows(delta > 0 and -3 or 3)
+	end)
+	bar:Hide()
+	window.scrollBar = bar
+
+	list = CreateFrame("Frame", nil, window, "BackdropTemplate")
+	list:SetFrameStrata("FULLSCREEN_DIALOG")
+	list:SetClampedToScreen(true)
+	list:EnableMouse(true)
+	Flat(list, { 0.06, 0.06, 0.075, 0.98 }, { GOLD[1], GOLD[2], GOLD[3], 0.6 })
+	list:Hide()
+	list.items = {}
+	list.Pick = function(i)
+		local row, choice = listRow, listChoices[i]
+		CloseList()
+		if row and choice then
+			SetValue(row, choice[1])
+		end
+		UpdateRows()
+	end
+	list:EnableMouseWheel(true)
+	list:SetScript("OnMouseWheel", function(_, delta)
+		if listRow then
+			listCursor = math.max(1, math.min(#listChoices, listCursor - delta * 3))
+			UpdateList()
+		end
+	end)
+	-- Typing filters the choices; the controller keeps moving through what is left.
+	list.search = CreateFrame("EditBox", "GamepadXIVConfigListSearch", list, "SearchBoxTemplate")
+	list.search:SetHeight(22)
+	list.search:SetPoint("TOPLEFT", 12, -8)
+	list.search:SetPoint("TOPRIGHT", -8, -8)
+	list.search:SetAutoFocus(false)
+	list.search:HookScript("OnTextChanged", function()
+		if listRow then
+			FilterList()
+			listCursor, listOffset = 1, 0
+			UpdateList()
+		end
+	end)
+	list.search:SetScript("OnEnterPressed", function(self)
+		self:ClearFocus()
+		if listRow and #listChoices > 0 then
+			list.Pick(listCursor)
+		end
+	end)
+	list.search:SetScript("OnEscapePressed", function(self)
+		self:ClearFocus()
+		CloseList()
+	end)
+	list.empty = list:CreateFontString(nil, "OVERLAY", "GameFontDisable")
+	list.empty:SetPoint("TOPLEFT", 13, -5 - LIST_SEARCH_HEIGHT - 4)
+	list.empty:SetText("No matches")
+	list.more = list:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+	list.more:SetPoint("BOTTOM", 0, 4)
+
+	window.tip = window:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	window.tip:SetPoint("BOTTOMLEFT", 24 + SIDEBAR, 56)
+	window.tip:SetPoint("BOTTOMRIGHT", -24, 56)
+	window.tip:SetHeight(76) -- two lines with button icons, in the gap under the rows
+	window.tip:SetJustifyH("LEFT")
+	window.tip:SetJustifyV("TOP")
+
+	-- The hints line up with the window: changing tab under the tab column, moving through the rows
+	-- in the middle, and pick and close at the right end, under the close button.
+	window.tabHint = window:CreateFontString(nil, "OVERLAY", "GameFontDisable")
+	window.tabHint:SetPoint("LEFT", window, "BOTTOMLEFT", 20, 23)
+	window.hint = window:CreateFontString(nil, "OVERLAY", "GameFontDisable")
+	window.closeHint = window:CreateFontString(nil, "OVERLAY", "GameFontDisable")
+	window.closeHint:SetPoint("RIGHT", window, "BOTTOMRIGHT", -20, 23)
+	-- Redrawn on every show and when another controller is plugged in, so the icons match it.
+	window.UpdateHint = function()
+		-- Each hint is its buttons right next to their word, with a divider before the next one, so
+		-- no button reads as belonging to the wrong word.
+		local hints = {
+			{ "{PADDUP}{PADDDOWN}", "rows" },
+			{ "{PADDLEFT}{PADDRIGHT}", "change" },
+		}
+		local function Hint(buttons, word)
+			return ButtonText(buttons, 22) .. " |cffd0d0d0" .. word .. "|r"
+		end
+		local parts = {}
+		for _, hint in ipairs(hints) do
+			tinsert(parts, Hint(hint[1], hint[2]))
+		end
+		window.hint:SetText(table.concat(parts, "    |cff4d4d4d|||r    "))
+		window.tabHint:SetText(Hint("{PADLSHOULDER}{PADRSHOULDER}", "tabs"))
+		window.closeHint:SetText(Hint("{PAD1}", "pick") .. "    |cff4d4d4d|||r    " .. Hint("{PAD2}", "close"))
+		-- Centred in the space left between the tab column and pick / close, so it keeps clear of both.
+		local closeLeft = WIDTH - 20 - window.closeHint:GetStringWidth()
+		window.hint:ClearAllPoints()
+		window.hint:SetPoint("CENTER", window, "BOTTOMLEFT", (SIDEBAR + closeLeft) / 2, 23)
+	end
+	if InputDeviceIconSetManager then
+		InputDeviceIconSetManager:RegisterActiveInputDeviceIconSetUpdatedCallback(function()
+			if window:IsShown() then
+				window.UpdateHint()
+				UpdateRows()
+			end
+		end, window)
+	end
+
+	-- At the foot of the tab column, where it reads as part of the tab it resets, clear of the hints.
+	local defaults = CreateFlatButton(window, SIDEBAR - 24, 26, "GameFontHighlightSmall")
+	window.defaults = defaults
+	defaults:SetPoint("BOTTOM", window, "BOTTOMLEFT", SIDEBAR / 2, 60)
+	-- Named after what it resets: the open tab, or the search results. UpdateRows sets the text.
+	defaults:HookScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:SetText(searchRows and "Reset the found settings" or ("Reset the " .. tabs[selectedTab].name .. " tab"))
+		GameTooltip:AddLine(searchRows and "Puts the settings found by the search back to their defaults."
+			or ("Puts every setting on the " .. tabs[selectedTab].name .. " tab back to its default."), 1, 1, 1, true)
+		GameTooltip:Show()
+	end)
+	defaults:HookScript("OnLeave", function() GameTooltip:Hide() end)
+	defaults:SetScript("OnClick", ResetTab)
+
+	-- The tutorial, right above: easy to find again for anyone who closed it at the start.
+	local tour = CreateFlatButton(window, SIDEBAR - 24, 26, "GameFontHighlightSmall")
+	tour:SetPoint("BOTTOM", defaults, "TOP", 0, 6)
+	tour:SetText(TUTORIAL_ICON .. "  Tutorial")
+	tour:HookScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_TOP")
+		GameTooltip:SetText("Start the tutorial")
+		GameTooltip:AddLine("A short walk through every button, with the controller.", 1, 1, 1, true)
+		GameTooltip:Show()
+	end)
+	tour:HookScript("OnLeave", function() GameTooltip:Hide() end)
+	tour:SetScript("OnClick", CloseAnd(function() ns.StartTutorial() end))
+
+	-- The column on the left: a search box, then one button per tab.
+	local sidebar = window:CreateTexture(nil, "BACKGROUND", nil, 1)
+	sidebar:SetPoint("TOPLEFT", 1, -1 - TITLE_HEIGHT - 1)
+	sidebar:SetPoint("BOTTOMLEFT", 1, 47)
+	sidebar:SetWidth(SIDEBAR - 1)
+	sidebar:SetColorTexture(unpack(SIDE_PANEL))
+	local divider = window:CreateTexture(nil, "ARTWORK")
+	divider:SetPoint("TOPLEFT", SIDEBAR, -TITLE_HEIGHT - 2)
+	divider:SetPoint("BOTTOMLEFT", SIDEBAR, 47)
+	divider:SetWidth(1)
+	divider:SetColorTexture(1, 1, 1, 0.08)
+	-- The bottom strip with the controller hint and the reset button.
+	local footer = window:CreateTexture(nil, "BACKGROUND", nil, 2)
+	footer:SetPoint("BOTTOMLEFT", 1, 1)
+	footer:SetPoint("BOTTOMRIGHT", -1, 1)
+	footer:SetHeight(45)
+	footer:SetColorTexture(0.1, 0.1, 0.125, 1)
+	local footerLine = window:CreateTexture(nil, "ARTWORK")
+	footerLine:SetPoint("BOTTOMLEFT", 1, 46)
+	footerLine:SetPoint("BOTTOMRIGHT", -1, 46)
+	footerLine:SetHeight(1)
+	footerLine:SetColorTexture(1, 1, 1, 0.08)
+
+	local search = CreateFrame("EditBox", "GamepadXIVConfigSearch", window, "SearchBoxTemplate")
+	search:SetSize(SIDEBAR - 34, 22)
+	search:SetPoint("TOPLEFT", 20, -TITLE_HEIGHT - 14)
+	search:SetAutoFocus(false)
+	search:HookScript("OnTextChanged", function(self)
+		Search(self:GetText())
+	end)
+	search:SetScript("OnEnterPressed", function(self)
+		self:ClearFocus()
+	end)
+	window.search = search
+
+	tabButtons = {}
+	for index, tab in ipairs(tabs) do
+		local button = CreateFrame("Button", nil, window)
+		button:SetSize(SIDEBAR - 16, 34)
+		button:SetPoint("TOPLEFT", window, "TOPLEFT", 8, -TITLE_HEIGHT - 50 - (index - 1) * 38)
+		button.selected = button:CreateTexture(nil, "BACKGROUND")
+		button.selected:SetAllPoints()
+		button.selected:SetColorTexture(GOLD[1], GOLD[2], GOLD[3], 0.13)
+		button.selectedBar = button:CreateTexture(nil, "ARTWORK")
+		button.selectedBar:SetPoint("TOPLEFT")
+		button.selectedBar:SetPoint("BOTTOMLEFT")
+		button.selectedBar:SetWidth(3)
+		button.selectedBar:SetColorTexture(GOLD[1], GOLD[2], GOLD[3], 1)
+		local hover = button:CreateTexture(nil, "HIGHLIGHT")
+		hover:SetAllPoints()
+		hover:SetColorTexture(1, 1, 1, 0.06)
+		button.icon = button:CreateTexture(nil, "ARTWORK")
+		button.icon:SetSize(22, 22)
+		button.icon:SetPoint("LEFT", 12, 0)
+		button.icon:SetTexture(tab.icon)
+		button.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+		button.text = button:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+		button.text:SetPoint("LEFT", button.icon, "RIGHT", 10, 0)
+		button.text:SetPoint("RIGHT", -6, 0)
+		button.text:SetJustifyH("LEFT")
+		button.text:SetText(tab.name)
+		button:SetScript("OnClick", function() SelectTab(index) end)
+		tabButtons[index] = button
+	end
+
+	CreateNavButtons()
+	CreateDialog()
+	CreatePreview()
+	window:SetScript("OnShow", function()
+		RebuildRingRows()
+		window.UpdateHint()
+		BindNav()
+		UpdateRows()
+	end)
+	window:SetScript("OnHide", function()
+		CloseList()
+		dialog:Hide()
+		if not InCombatLockdown() then
+			ClearOverrideBindings(window)
+		end
+	end)
+	-- Bindings can still be changed while this event runs, just before combat locks them.
+	window:RegisterEvent("PLAYER_REGEN_DISABLED")
+	window:SetScript("OnEvent", function()
+		window:Hide()
+	end)
+end
+
+-- A page in the game's AddOns options that only opens this window.
+local function RegisterOptionsPage()
+	local page = CreateFrame("Frame")
+	local text = page:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	text:SetPoint("TOPLEFT", 16, -16)
+	text:SetText("Gamepad XIV has its own settings window.")
+	local open = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
+	open:SetSize(200, 26)
+	open:SetPoint("TOPLEFT", text, "BOTTOMLEFT", 0, -12)
+	open:SetText("Open settings")
+	open:SetScript("OnClick", function() ns.OpenConfig() end)
+	local category = Settings.RegisterCanvasLayoutCategory(page, "Gamepad XIV")
+	Settings.RegisterAddOnCategory(category)
+end
+
+function ns.CreateConfig()
+	CreateWindow()
+	RegisterOptionsPage()
+end
+
+function ns.CloseConfig()
+	if window then
+		window:Hide()
+	end
+end
+
+-- Opens the window, or closes it if it is open.
+function ns.OpenConfig()
+	if InCombatLockdown() then
+		ns.Print("Settings are not available in combat.")
+		return
+	end
+	if not window then
+		return
+	end
+	if window:IsShown() then
+		window:Hide()
+		return
+	end
+	if ns.editing then
+		ns.ToggleEditor()
+	end
+	window:Show()
+end

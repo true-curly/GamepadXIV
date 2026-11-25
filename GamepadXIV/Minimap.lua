@@ -1,0 +1,248 @@
+local _, ns = ...
+
+local button
+
+local function PlaceButton()
+	local angle = math.rad(ns.db.minimapAngle)
+	local radius = Minimap:GetWidth() / 2 + 5
+	button:ClearAllPoints()
+	button:SetPoint("CENTER", Minimap, "CENTER", math.cos(angle) * radius, math.sin(angle) * radius)
+end
+
+function ns.UpdateMinimapButton()
+	if button then
+		button:SetShown(ns.db.minimapShown)
+	end
+end
+
+local function SetSetting(key, value)
+	ns.db[key] = value
+	ns.Sync()
+end
+
+local function SetMinimapShown(shown)
+	ns.db.minimapShown = shown
+	ns.UpdateMinimapButton()
+	if not shown then
+		ns.Print("Minimap icon hidden. /gxiv minimap brings it back.")
+	end
+end
+
+-- A plain frame on purpose. Blizzard's menu claims Forever's gamepad focus when it opens, and when
+-- that happens from addon code, Forever's protected interact call gets blocked.
+-- Short on purpose: the rest is in the settings, a left click away.
+local ROW_HEIGHT = 22
+local DIVIDER_HEIGHT = 9
+local MENU_WIDTH = 250
+local menu
+
+local function GetMenuRows()
+	return {
+		{ text = "Settings", onClick = function() ns.OpenConfig() end, closes = true },
+		{ text = "Move bars", onClick = function() ns.ToggleMove() end, closes = true },
+		{ text = "Tutorial", onClick = function() ns.StartTutorial() end, closes = true },
+		{ divider = true },
+		{
+			text = "Enable layout",
+			isChecked = function() return ns.db.enabled end,
+			onClick = function() SetSetting("enabled", not ns.db.enabled) end,
+		},
+		{
+			text = "Face target",
+			isChecked = function() return ns.db.autoFace end,
+			onClick = function()
+				ns.AllowExperimentalCamera()
+				SetSetting("autoFace", not ns.db.autoFace)
+			end,
+		},
+		{ divider = true },
+		-- For bug reports: both are saved quietly and written by /reload.
+		{
+			text = "[Debug] Log this session",
+			isChecked = function() return ns.db.playLogOn end,
+			onClick = function() ns.TogglePlayLog() end,
+		},
+		{
+			text = "[Debug] Log UI",
+			onClick = function()
+				ns.PrintDebug(true)
+				ns.Print("Debug report saved quietly; /reload to write it.")
+			end,
+			closes = true,
+		},
+		{ divider = true },
+		{ text = "Hide minimap icon", onClick = function() SetMinimapShown(false) end, closes = true, dim = true },
+	}
+end
+
+local function RefreshMenu()
+	for _, row in ipairs(menu.rows) do
+		if row.check then
+			row.check:SetShown(row.info.isChecked() and true or false)
+		end
+	end
+end
+
+local function CreateMenu()
+	menu = CreateFrame("Frame", "GamepadXIVMenu", UIParent, "BackdropTemplate")
+	menu:SetFrameStrata("DIALOG")
+	menu:SetClampedToScreen(true)
+	menu:EnableMouse(true)
+	menu:SetBackdrop({
+		bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+		edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+		tile = true, tileSize = 32, edgeSize = 16,
+		insets = { left = 4, right = 4, top = 4, bottom = 4 },
+	})
+	menu:Hide()
+
+	local title = menu:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	title:SetPoint("TOPLEFT", 12, -11)
+	title:SetText(ns.ICON_MARKUP .. " Gamepad XIV")
+
+	menu.rows = {}
+	local y = -32
+	for _, info in ipairs(GetMenuRows()) do
+		if info.divider then
+			local line = menu:CreateTexture(nil, "ARTWORK")
+			line:SetColorTexture(1, 0.82, 0, 0.25)
+			line:SetHeight(1)
+			line:SetPoint("TOPLEFT", 14, y - 4)
+			line:SetPoint("TOPRIGHT", -14, y - 4)
+			y = y - DIVIDER_HEIGHT
+		else
+			local row = CreateFrame("Button", nil, menu)
+			row:SetSize(MENU_WIDTH - 16, ROW_HEIGHT)
+			row:SetPoint("TOPLEFT", 8, y)
+			row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
+			row.info = info
+
+			local label = row:CreateFontString(nil, "OVERLAY", info.dim and "GameFontDisableSmall" or "GameFontHighlight")
+			label:SetPoint("LEFT", 8, 0)
+			label:SetText(info.text)
+
+			-- An on / off setting gets a box on the right, ticked while on.
+			if info.isChecked then
+				local box = row:CreateTexture(nil, "ARTWORK")
+				box:SetSize(20, 20)
+				box:SetPoint("RIGHT", -4, 0)
+				box:SetTexture("Interface\\Buttons\\UI-CheckBox-Up")
+				row.check = row:CreateTexture(nil, "OVERLAY")
+				row.check:SetAllPoints(box)
+				row.check:SetTexture("Interface\\Buttons\\UI-CheckBox-Check")
+			end
+
+			row:SetScript("OnClick", function()
+				if info.closes then
+					menu:Hide()
+				end
+				info.onClick()
+				if menu:IsShown() then
+					RefreshMenu()
+				end
+			end)
+			tinsert(menu.rows, row)
+			y = y - ROW_HEIGHT
+		end
+	end
+	menu:SetSize(MENU_WIDTH, -y + 10)
+
+	-- Any click elsewhere closes it, and so does combat.
+	menu:SetScript("OnShow", function(self)
+		self:RegisterEvent("GLOBAL_MOUSE_DOWN")
+		self:RegisterEvent("PLAYER_REGEN_DISABLED")
+	end)
+	menu:SetScript("OnHide", function(self)
+		self:UnregisterAllEvents()
+	end)
+	menu:SetScript("OnEvent", function(self, event)
+		if event == "PLAYER_REGEN_DISABLED" or not self:IsMouseOver() then
+			self:Hide()
+		end
+	end)
+end
+
+function ns.OpenMenu()
+	if not menu then
+		CreateMenu()
+	end
+	if menu:IsShown() then
+		menu:Hide()
+		return
+	end
+	local scale = UIParent:GetEffectiveScale()
+	local cursorX, cursorY = GetCursorPosition()
+	menu:ClearAllPoints()
+	menu:SetPoint("TOPRIGHT", UIParent, "BOTTOMLEFT", cursorX / scale, cursorY / scale)
+	RefreshMenu()
+	menu:Show()
+end
+
+local function HandleClick(_, mouseButton)
+	if mouseButton == "RightButton" then
+		ns.OpenMenu()
+	else
+		ns.OpenConfig()
+	end
+end
+
+-- The AddOn compartment's entry, declared in the .toc. Depending on the client, the second
+-- argument is the button name or a table holding it.
+function GamepadXIV_OnCompartmentClick(_, input)
+	if ns.root then
+		HandleClick(nil, type(input) == "table" and input.buttonName or input)
+	end
+end
+
+function ns.CreateMinimapButton()
+	if not Minimap then
+		return
+	end
+
+	button = CreateFrame("Button", "GamepadXIVMinimapButton", Minimap)
+	button:SetSize(31, 31)
+	button:SetFrameStrata("MEDIUM")
+	button:SetFrameLevel(Minimap:GetFrameLevel() + 8)
+	button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+	button:RegisterForDrag("LeftButton")
+	button:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+
+	local icon = button:CreateTexture(nil, "BACKGROUND")
+	icon:SetSize(20, 20)
+	icon:SetPoint("TOPLEFT", 6, -5)
+	icon:SetTexture(ns.ICON)
+
+	local border = button:CreateTexture(nil, "OVERLAY")
+	border:SetSize(53, 53)
+	border:SetPoint("TOPLEFT")
+	border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+
+	button:SetScript("OnClick", HandleClick)
+
+	button:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+		GameTooltip:SetText("Gamepad XIV")
+		GameTooltip:AddLine("Left click: settings", 1, 1, 1)
+		GameTooltip:AddLine("Right click: menu", 1, 1, 1)
+		GameTooltip:AddLine("Drag: move this icon", 1, 1, 1)
+		GameTooltip:Show()
+	end)
+	button:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+	button:SetScript("OnDragStart", function(self)
+		GameTooltip:Hide()
+		self:SetScript("OnUpdate", function()
+			local cursorX, cursorY = GetCursorPosition()
+			local scale = Minimap:GetEffectiveScale()
+			local centerX, centerY = Minimap:GetCenter()
+			ns.db.minimapAngle = math.deg(math.atan2(cursorY / scale - centerY, cursorX / scale - centerX))
+			PlaceButton()
+		end)
+	end)
+	button:SetScript("OnDragStop", function(self)
+		self:SetScript("OnUpdate", nil)
+	end)
+
+	PlaceButton()
+	ns.UpdateMinimapButton()
+end
