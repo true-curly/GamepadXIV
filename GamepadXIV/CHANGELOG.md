@@ -9,6 +9,7 @@
 ### Fixes
 
 - Lua errors from the game or other addons no longer break the controller UI, such as when looting in dungeons.
+- Forever's hidden gamepad bars no longer take mouse clicks where they would be on screen.
 - Pressing a trigger again right after using its bar, or after L2 + R2, no longer opens the top bar by mistake.
 - Double taps are easier to hit in combat: the double tap window is a bit longer by default and can go higher.
 

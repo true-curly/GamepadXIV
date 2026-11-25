@@ -2319,6 +2319,68 @@ function ns.IsActive()
 	return driver and driver:GetAttribute("fc-yield") == 0
 end
 
+-- Alpha 0 only hides Forever's bars: they stay shown, since its bindings and chords still click
+-- their buttons, so they would still take mouse clicks. Mouse input is turned off on every frame
+-- under a faded bar and turned back on for the ones this addon turned off. Bindings and secure
+-- clicks do not need the mouse, so they keep working. Out of combat only, as the buttons are protected.
+local mouseOff = {}
+local mouseFaded = {}
+local mouseKeep = {}
+local mousePending
+
+local function SetTreeMouse(frame, enabled)
+	if mouseKeep[frame] then
+		enabled = true
+	end
+	if enabled then
+		if mouseOff[frame] then
+			mouseOff[frame] = nil
+			frame:EnableMouse(true)
+		end
+	elseif frame.IsMouseEnabled and frame:IsMouseEnabled() then
+		mouseOff[frame] = true
+		frame:EnableMouse(false)
+	end
+	for _, child in ipairs({ frame:GetChildren() }) do
+		SetTreeMouse(child, enabled)
+	end
+end
+
+local mouseEvents = CreateFrame("Frame")
+mouseEvents:SetScript("OnEvent", function(self)
+	self:UnregisterEvent("PLAYER_REGEN_ENABLED")
+	ns.ApplyHiddenBarMouse()
+end)
+
+function ns.ApplyHiddenBarMouse()
+	if InCombatLockdown() then
+		if not mousePending then
+			mousePending = true
+			mouseEvents:RegisterEvent("PLAYER_REGEN_ENABLED")
+		end
+		return
+	end
+	mousePending = nil
+	for frame, faded in pairs(mouseFaded) do
+		SetTreeMouse(frame, not faded)
+	end
+end
+
+local function SetBarMouse(frame, enabled)
+	if frame and mouseFaded[frame] ~= not enabled then
+		mouseFaded[frame] = not enabled
+		ns.ApplyHiddenBarMouse()
+	end
+end
+
+-- The pet menu buttons stay clickable when the player keeps them shown on the faded bar.
+function ns.SetKeepMouse(frame, keep)
+	if frame and (mouseKeep[frame] or false) ~= keep then
+		mouseKeep[frame] = keep or nil
+		ns.ApplyHiddenBarMouse()
+	end
+end
+
 -- Forever's bind flow from the spellbook stays in charge of the buttons, but its bars are hidden and this
 -- addon's bars show the result. Slots land on Forever's current page, which is the set of the same number.
 local function SetEditorBarsShown(shown)
@@ -2329,6 +2391,9 @@ local function SetEditorBarsShown(shown)
 	for _, bar in pairs(pageUnit.actionBars) do
 		if type(bar) == "table" and bar.SetAlpha then
 			bar:SetAlpha(shown and 1 or 0)
+			if bar.GetChildren then
+				SetBarMouse(bar, shown)
+			end
 		end
 	end
 end
@@ -2361,6 +2426,7 @@ function ns.ApplyForeverBarVisibility(foreverShown)
 		ns.Trail("GamepadMainActionBarFrame:SetAlpha " .. alpha)
 		GamepadMainActionBarFrame:SetAlpha(alpha)
 	end
+	SetBarMouse(GamepadMainActionBarFrame, foreverShown)
 	local inBindFlow = foreverShown and ns.foreverEditorOpen
 	SetEditorBarsShown(not inBindFlow)
 	editorWatcher:SetShown(inBindFlow and true or false)
@@ -2580,6 +2646,7 @@ function ns.ApplyPetButtons()
 				local button = pageUnit and pageUnit[key]
 				if button then
 					button:SetIgnoreParentAlpha(shown)
+					ns.SetKeepMouse(button, shown)
 				end
 			end
 			if classMenuHints[menu] then
