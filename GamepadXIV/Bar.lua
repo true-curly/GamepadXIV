@@ -620,6 +620,38 @@ function ns.ShowLayer(layer, leftSide, rightSide, set, form)
 	end
 end
 
+-- ElvUI's party and raid frames (ElvUF_Party..., ElvUF_Raid1/2/3..., ElvUF_RaidPet...), found through
+-- its copy of oUF. Tank and assist frames are left out: they repeat members already shown.
+function ns.ElvUIGroupFrames()
+	local elv = _G.ElvUF
+	local found = {}
+	for _, frame in ipairs(elv and elv.objects or {}) do
+		local name = frame.GetName and frame:GetName()
+		if name and (name:find("^ElvUF_Party") or name:find("^ElvUF_Raid")) then
+			tinsert(found, frame)
+		end
+	end
+	return found
+end
+
+local function FrameUnit(frame)
+	return frame.unit or frame:GetAttribute("unit")
+end
+
+-- ElvUI hides Blizzard's frames, so its own come first; its player and pet frames are the fallback.
+local function FindElvUIFrame(unit)
+	if not _G.ElvUF then
+		return nil
+	end
+	for _, frame in ipairs(ns.ElvUIGroupFrames()) do
+		if frame:IsVisible() and FrameUnit(frame) == unit then
+			return frame
+		end
+	end
+	local single = (unit == "player" and _G.ElvUF_Player) or (unit == "pet" and _G.ElvUF_Pet)
+	return single and single:IsVisible() and single or nil
+end
+
 local function FindCompactFrame(unit)
 	for _, key in ipairs({ "memberUnitFrames", "petUnitFrames" }) do
 		for _, frame in ipairs(CompactPartyFrame and CompactPartyFrame[key] or {}) do
@@ -646,7 +678,7 @@ end
 
 -- The frame showing a unit, whichever party or raid style is in use.
 local function FindUnitFrame(unit)
-	local frame = FindCompactFrame(unit)
+	local frame = FindElvUIFrame(unit) or FindCompactFrame(unit)
 	if frame then
 		return frame
 	end

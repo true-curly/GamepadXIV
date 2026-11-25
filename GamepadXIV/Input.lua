@@ -521,6 +521,10 @@ local function RefreshUnitFrameRefs()
 			Add(_G["CompactRaidGroup" .. group .. "Member" .. member])
 		end
 	end
+	-- ElvUI's party and raid frames, so the D-pad can move between them too.
+	for _, frame in ipairs(ns.ElvUIGroupFrames and ns.ElvUIGroupFrames() or {}) do
+		Add(frame)
+	end
 	if driver:GetAttribute("fc-ufCount") ~= count then
 		driver:SetAttribute("fc-ufCount", count)
 		driver:SetAttribute("fc-ufCursor", nil)
