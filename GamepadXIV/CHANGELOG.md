@@ -13,6 +13,7 @@
 - With ElvUI, the party and raid highlight now shows on ElvUI's unit frames instead of Blizzard's hidden ones, and the D-pad moves between ElvUI's frames.
 - Pressing a trigger again right after using its bar, or after L2 + R2, no longer opens the top bar by mistake.
 - Double taps are easier to hit in combat: the double tap window is a bit longer by default and can go higher.
+- Opening a window while holding R1, L2 or R2 no longer leaves that hold stuck after letting go of the button.
 
 ## v0.1.26
 

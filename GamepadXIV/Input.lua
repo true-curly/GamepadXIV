@@ -610,37 +610,76 @@ local function PadDown(state, binding)
 	return false
 end
 
--- A window that opens from L1 + a face button can take L1's release for its own tabs, which leaves
--- the driver in the L1 layer: the next face button then opens the window again. Out of combat,
--- the layer goes back to the base once L1 has been seen up twice in a row.
-local function CreateL1Release()
+-- A window that opens while L1, R1, L2 or R2 is held can take that button's release: Forever's focus
+-- binds the pad to the window, so the release never reaches the addon. That left the driver in the
+-- held layer until the button was pressed again (L1: the next face button opened the window again).
+-- Out of combat, a hold the driver still has is let go once its button has been seen up twice in a row.
+local HOLD_RELEASES = {
+	{
+		key = "PADLSHOULDER", log = "L1 layer stuck with L1 up: released",
+		held = function() return driver:GetAttribute("fc-layer") == "L1" end,
+		body = [[
+			if self:GetAttribute("fc-layer") == "L1" then
+				self:SetAttribute("fc-layer", "BASE")
+				self:RunAttribute("ApplyLayer")
+			end
+		]],
+	},
+	{
+		key = "PADRSHOULDER", log = "R1 set layer stuck with R1 up: released",
+		held = function() return driver:GetAttribute("fc-layer") == "SET" end,
+		-- Not a tap: the release was missed, so the sets stay as they are.
+		body = [[
+			if self:GetAttribute("fc-layer") == "SET" then
+				self:SetAttribute("fc-layer", "BASE")
+				self:SetAttribute("fc-r1Chord", 1)
+				self:RunAttribute("ApplyLayer")
+			end
+		]],
+	},
+	{
+		key = "PADLTRIGGER", log = "L2 hold stuck with L2 up: released",
+		held = function() return driver:GetAttribute("fc-lDown") == 1 end,
+		-- The release the trigger missed, never quick, so mixed mode does not latch the side.
+		body = [[
+			if self:GetAttribute("fc-lDown") == 1 then
+				self:RunAttribute("OnTrigger", "L", 0, 0, 0)
+			end
+		]],
+	},
+	{
+		key = "PADRTRIGGER", log = "R2 hold stuck with R2 up: released",
+		held = function() return driver:GetAttribute("fc-rDown") == 1 end,
+		body = [[
+			if self:GetAttribute("fc-rDown") == 1 then
+				self:RunAttribute("OnTrigger", "R", 0, 0, 0)
+			end
+		]],
+	},
+}
+
+local function CreateHoldRelease()
 	local watcher = CreateFrame("Frame")
-	local elapsedSince, upCount = 0, 0
+	local elapsedSince = 0
+	local upCounts = {}
 	watcher:SetScript("OnUpdate", function(_, elapsed)
 		elapsedSince = elapsedSince + elapsed
 		if elapsedSince < 0.15 then
 			return
 		end
 		elapsedSince = 0
-		if InCombatLockdown() or driver:GetAttribute("fc-layer") ~= "L1" then
-			upCount = 0
-			return
-		end
-		local state = GetPadState()
-		if not state or PadDown(state, "PADLSHOULDER") then
-			upCount = 0
-			return
-		end
-		upCount = upCount + 1
-		if upCount >= 2 then
-			ns.PlayLog("L1 layer stuck with L1 up: released")
-			upCount = 0
-			SecureHandlerExecute(driver, [[
-				if self:GetAttribute("fc-layer") == "L1" then
-					self:SetAttribute("fc-layer", "BASE")
-					self:RunAttribute("ApplyLayer")
+		local state = not InCombatLockdown() and GetPadState()
+		for i, hold in ipairs(HOLD_RELEASES) do
+			if not state or not hold.held() or PadDown(state, hold.key) then
+				upCounts[i] = 0
+			else
+				upCounts[i] = (upCounts[i] or 0) + 1
+				if upCounts[i] >= 2 then
+					ns.PlayLog(hold.log)
+					upCounts[i] = 0
+					SecureHandlerExecute(driver, hold.body)
 				end
-			]])
+			end
 		end
 	end)
 end
@@ -1954,7 +1993,7 @@ function ns.CreateInput()
 	FixEquipmentSetList()
 	CreateMapPinChord()
 	CreateBackChat()
-	CreateL1Release()
+	CreateHoldRelease()
 	KeepChatOpenForLinks()
 	HookInteractPrompt()
 	CreateInteractHud()
